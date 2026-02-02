@@ -1,0 +1,12 @@
+# Basic UpgradeRequest - uses latest available update
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: my-app-upgrade
+  namespace: default
+spec:
+  managedAppRef:
+    name: my-app
+  # targetVersion: optional, uses availableUpdate from ManagedApp if omitted
+  # skipSnapshot: false
+  # dryRun: false

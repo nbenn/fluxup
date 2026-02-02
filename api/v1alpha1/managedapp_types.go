@@ -101,6 +101,12 @@ type VersionPolicy struct {
 	// +kubebuilder:validation:Enum=none;patch;minor;major
 	// +kubebuilder:default=none
 	AutoUpdate string `json:"autoUpdate,omitempty"`
+
+	// VersionPath is the YAML path to the version field in the manifest.
+	// For HelmRelease, defaults to ".spec.chart.spec.version".
+	// For other resources, must be specified explicitly.
+	// +optional
+	VersionPath string `json:"versionPath,omitempty"`
 }
 
 // HealthCheckConfig configures health checking

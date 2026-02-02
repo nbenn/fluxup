@@ -66,6 +66,20 @@ spec:
         image: controller:latest
         name: manager
         ports: []
+        env:
+          # Git configuration for UpgradeRequest controller (Phase 2)
+          # Uncomment and configure to enable the UpgradeRequest controller
+          # - name: GIT_BACKEND
+          #   value: "gitea"
+          # - name: GIT_REPO_URL
+          #   value: "https://gitea.example.com/org/repo"
+          # - name: GIT_BRANCH
+          #   value: "main"
+          # - name: GIT_TOKEN
+          #   valueFrom:
+          #     secretKeyRef:
+          #       name: fluxup-git-credentials
+          #       key: token
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false

@@ -8,6 +8,7 @@ rules:
   - ""
   resources:
   - configmaps
+  - persistentvolumeclaims
   verbs:
   - get
   - list
@@ -25,6 +26,7 @@ rules:
   - fluxup.dev
   resources:
   - managedapps
+  - upgraderequests
   verbs:
   - create
   - delete
@@ -37,12 +39,14 @@ rules:
   - fluxup.dev
   resources:
   - managedapps/finalizers
+  - upgraderequests/finalizers
   verbs:
   - update
 - apiGroups:
   - fluxup.dev
   resources:
   - managedapps/status
+  - upgraderequests/status
   verbs:
   - get
   - patch
@@ -60,6 +64,18 @@ rules:
   resources:
   - kustomizations
   verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots
+  verbs:
+  - create
+  - delete
   - get
   - list
   - watch

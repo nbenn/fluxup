@@ -27,6 +27,7 @@ import (
 
 	helmv2 "github.com/fluxcd/helm-controller/api/v2"
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -39,7 +40,11 @@ import (
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
 	"github.com/nbenn/fluxup/internal/controller"
+	"github.com/nbenn/fluxup/internal/flux"
+	"github.com/nbenn/fluxup/internal/git"
 	"github.com/nbenn/fluxup/internal/renovate"
+	"github.com/nbenn/fluxup/internal/snapshot"
+	yamlpkg "github.com/nbenn/fluxup/internal/yaml"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -54,6 +59,7 @@ func init() {
 	utilruntime.Must(fluxupv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(helmv2.AddToScheme(scheme))
 	utilruntime.Must(kustomizev1.AddToScheme(scheme))
+	utilruntime.Must(snapshotv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -67,6 +73,12 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+
+	// Git configuration flags
+	var gitBackend string
+	var gitRepoURL string
+	var gitBranch string
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -84,6 +96,11 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+
+	// Git configuration flags
+	flag.StringVar(&gitBackend, "git-backend", "", "Git backend type (gitea, github, gitlab). Can also be set via GIT_BACKEND env var.")
+	flag.StringVar(&gitRepoURL, "git-repo-url", "", "Git repository URL. Can also be set via GIT_REPO_URL env var.")
+	flag.StringVar(&gitBranch, "git-branch", "main", "Git branch to operate on. Can also be set via GIT_BRANCH env var.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -204,6 +221,52 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "UpdatesConfigMap")
 		os.Exit(1)
+	}
+
+	// Setup UpgradeRequest controller (Phase 2)
+	// Git configuration from flags or environment
+	if gitBackend == "" {
+		gitBackend = os.Getenv("GIT_BACKEND")
+	}
+	if gitRepoURL == "" {
+		gitRepoURL = os.Getenv("GIT_REPO_URL")
+	}
+	if gitBranch == "" || gitBranch == "main" {
+		if envBranch := os.Getenv("GIT_BRANCH"); envBranch != "" {
+			gitBranch = envBranch
+		}
+	}
+	gitToken := os.Getenv("GIT_TOKEN")
+
+	// Only setup UpgradeRequest controller if Git is configured
+	if gitBackend != "" && gitRepoURL != "" && gitToken != "" {
+		gitConfig := git.Config{
+			Backend: gitBackend,
+			RepoURL: gitRepoURL,
+			Branch:  gitBranch,
+			Token:   gitToken,
+		}
+
+		gitManager, err := git.NewManager(gitConfig)
+		if err != nil {
+			setupLog.Error(err, "Failed to create git manager")
+			os.Exit(1)
+		}
+
+		if err := (&controller.UpgradeRequestReconciler{
+			Client:          mgr.GetClient(),
+			Scheme:          mgr.GetScheme(),
+			GitManager:      gitManager,
+			SnapshotManager: snapshot.NewManager(mgr.GetClient()),
+			FluxHelper:      flux.NewHelper(mgr.GetClient()),
+			YAMLEditor:      yamlpkg.NewEditor(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "UpgradeRequest")
+			os.Exit(1)
+		}
+		setupLog.Info("UpgradeRequest controller enabled", "backend", gitBackend, "repo", gitRepoURL)
+	} else {
+		setupLog.Info("UpgradeRequest controller disabled (Git not configured)")
 	}
 	// +kubebuilder:scaffold:builder
 

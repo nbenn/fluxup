@@ -1,0 +1,10 @@
+# UpgradeRequest with dry run - validates without making changes
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: my-app-upgrade-dryrun
+  namespace: default
+spec:
+  managedAppRef:
+    name: my-app
+  dryRun: true

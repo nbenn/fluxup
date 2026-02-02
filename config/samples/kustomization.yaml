@@ -1,4 +1,5 @@
 ## Append samples of your project ##
 resources:
 - fluxup_v1alpha1_managedapp.yaml
+- fluxup_v1alpha1_upgraderequest.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

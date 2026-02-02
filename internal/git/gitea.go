@@ -1,0 +1,169 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package git
+
+import (
+	"context"
+	"encoding/base64"
+	"fmt"
+	"net/url"
+	"strings"
+
+	"code.gitea.io/sdk/gitea"
+)
+
+// GiteaManager implements Manager for Gitea
+type GiteaManager struct {
+	client *gitea.Client
+	owner  string
+	repo   string
+	branch string
+}
+
+// NewGiteaManager creates a new Gitea Git manager
+func NewGiteaManager(cfg Config) (*GiteaManager, error) {
+	// Parse repo URL to extract owner and repo
+	parsed, err := url.Parse(cfg.RepoURL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing repo URL: %w", err)
+	}
+
+	// URL format: https://gitea.example.com/owner/repo
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("invalid repo URL format: %s (expected https://host/owner/repo)", cfg.RepoURL)
+	}
+	owner, repo := parts[0], parts[1]
+
+	// Remove .git suffix if present
+	repo = strings.TrimSuffix(repo, ".git")
+
+	// Create Gitea client
+	baseURL := fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
+	client, err := gitea.NewClient(baseURL, gitea.SetToken(cfg.Token))
+	if err != nil {
+		return nil, fmt.Errorf("creating gitea client: %w", err)
+	}
+
+	branch := cfg.Branch
+	if branch == "" {
+		branch = "main"
+	}
+
+	return &GiteaManager{
+		client: client,
+		owner:  owner,
+		repo:   repo,
+		branch: branch,
+	}, nil
+}
+
+// ReadFile reads a file from the repository
+func (g *GiteaManager) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	content, resp, err := g.client.GetContents(g.owner, g.repo, g.branch, path)
+	if err != nil {
+		if resp != nil && resp.StatusCode == 404 {
+			return nil, fmt.Errorf("file not found: %s", path)
+		}
+		return nil, fmt.Errorf("reading file: %w", err)
+	}
+
+	if content == nil || content.Content == nil {
+		return nil, fmt.Errorf("empty content for file: %s", path)
+	}
+
+	// Content is base64 encoded
+	decoded, err := base64.StdEncoding.DecodeString(*content.Content)
+	if err != nil {
+		return nil, fmt.Errorf("decoding content: %w", err)
+	}
+
+	return decoded, nil
+}
+
+// CommitFile commits a single file change
+func (g *GiteaManager) CommitFile(ctx context.Context, change FileChange, message string) (*CommitInfo, error) {
+	// Get current file SHA for update (required by Gitea API)
+	existing, _, _ := g.client.GetContents(g.owner, g.repo, g.branch, change.Path)
+
+	opts := gitea.UpdateFileOptions{
+		FileOptions: gitea.FileOptions{
+			Message:    message,
+			BranchName: g.branch,
+		},
+		Content: base64.StdEncoding.EncodeToString(change.Content),
+	}
+
+	if existing != nil && existing.SHA != "" {
+		opts.SHA = existing.SHA
+	}
+
+	resp, _, err := g.client.UpdateFile(g.owner, g.repo, change.Path, opts)
+	if err != nil {
+		return nil, fmt.Errorf("committing file: %w", err)
+	}
+
+	return &CommitInfo{
+		SHA:     resp.Commit.SHA,
+		Message: message,
+		URL:     resp.Commit.HTMLURL,
+	}, nil
+}
+
+// CommitFiles commits multiple file changes
+// Note: Gitea API doesn't support atomic multi-file commits,
+// so files are committed sequentially
+func (g *GiteaManager) CommitFiles(ctx context.Context, changes []FileChange, message string) (*CommitInfo, error) {
+	var lastCommit *CommitInfo
+	for _, change := range changes {
+		commit, err := g.CommitFile(ctx, change, message)
+		if err != nil {
+			return nil, fmt.Errorf("committing file %s: %w", change.Path, err)
+		}
+		lastCommit = commit
+	}
+	return lastCommit, nil
+}
+
+// GetLatestCommit returns the latest commit on the branch
+func (g *GiteaManager) GetLatestCommit(ctx context.Context) (*CommitInfo, error) {
+	commits, _, err := g.client.ListRepoCommits(g.owner, g.repo, gitea.ListCommitOptions{
+		SHA: g.branch,
+		ListOptions: gitea.ListOptions{
+			PageSize: 1,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("getting latest commit: %w", err)
+	}
+
+	if len(commits) == 0 {
+		return nil, fmt.Errorf("no commits found on branch %s", g.branch)
+	}
+
+	author := ""
+	if commits[0].Author != nil {
+		author = commits[0].Author.UserName
+	}
+
+	return &CommitInfo{
+		SHA:     commits[0].SHA,
+		Message: commits[0].RepoCommit.Message,
+		Author:  author,
+		URL:     commits[0].HTMLURL,
+	}, nil
+}

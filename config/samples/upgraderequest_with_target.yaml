@@ -1,0 +1,11 @@
+# UpgradeRequest with explicit target version
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: gitea-upgrade-to-11
+  namespace: default
+spec:
+  managedAppRef:
+    name: gitea
+  targetVersion:
+    chart: "11.0.0"

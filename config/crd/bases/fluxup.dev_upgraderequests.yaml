@@ -4,22 +4,25 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
-  name: managedapps.fluxup.dev
+  name: upgraderequests.fluxup.dev
 spec:
   group: fluxup.dev
   names:
-    kind: ManagedApp
-    listKind: ManagedAppList
-    plural: managedapps
-    singular: managedapp
+    kind: UpgradeRequest
+    listKind: UpgradeRequestList
+    plural: upgraderequests
+    singular: upgraderequest
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.conditions[?(@.type=='Ready')].status
-      name: Ready
+    - jsonPath: .status.conditions[?(@.type=='Complete')].status
+      name: Complete
       type: string
-    - jsonPath: .status.conditions[?(@.type=='UpdateAvailable')].status
-      name: Update
+    - jsonPath: .status.conditions[?(@.type=='Complete')].reason
+      name: Reason
+      type: string
+    - jsonPath: .spec.managedAppRef.name
+      name: ManagedApp
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -27,7 +30,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ManagedApp is the Schema for the managedapps API
+        description: UpgradeRequest is the Schema for the upgraderequests API
         properties:
           apiVersion:
             description: |-
@@ -47,24 +50,14 @@ spec:
           metadata:
             type: object
           spec:
-            description: ManagedAppSpec defines the desired state of ManagedApp
+            description: UpgradeRequestSpec defines the desired state of UpgradeRequest
             properties:
-              gitPath:
-                description: |-
-                  Path to the manifest in Git (for matching Renovate output and editing)
-                  Examples: "flux/apps/gitea/helmrelease.yaml", "flux/apps/bazarr/deployment.yaml"
-                type: string
-              healthCheck:
-                description: Health check configuration
-                properties:
-                  timeout:
-                    default: 5m
-                    description: Timeout for health checks
-                    type: string
-                type: object
-              kustomizationRef:
-                description: Reference to the Flux Kustomization that reconciles this
-                  app (for suspend/resume)
+              dryRun:
+                default: false
+                description: Dry run - validate only, don't apply
+                type: boolean
+              managedAppRef:
+                description: Reference to the ManagedApp to upgrade
                 properties:
                   name:
                     type: string
@@ -73,82 +66,12 @@ spec:
                 required:
                 - name
                 type: object
-              versionPolicy:
-                description: Version policy for updates
-                properties:
-                  autoUpdate:
-                    default: none
-                    enum:
-                    - none
-                    - patch
-                    - minor
-                    - major
-                    type: string
-                  versionPath:
-                    description: |-
-                      VersionPath is the YAML path to the version field in the manifest.
-                      For HelmRelease, defaults to ".spec.chart.spec.version".
-                      For other resources, must be specified explicitly.
-                    type: string
-                type: object
-              volumeSnapshots:
-                description: Volume snapshot configuration (Phase 2)
-                properties:
-                  enabled:
-                    type: boolean
-                  pvcs:
-                    items:
-                      description: PVCRef references a PVC for snapshotting
-                      properties:
-                        name:
-                          type: string
-                        namespace:
-                          type: string
-                      required:
-                      - name
-                      type: object
-                    type: array
-                  retentionPolicy:
-                    description: RetentionPolicy defines how long to keep snapshots
-                    properties:
-                      maxAge:
-                        type: string
-                      maxCount:
-                        type: integer
-                    type: object
-                  volumeSnapshotClassName:
-                    type: string
-                required:
-                - enabled
-                type: object
-              workloadRef:
-                description: |-
-                  Optional: explicit workload reference for health checks
-                  If omitted, controller checks only the Kustomization status
-                properties:
-                  kind:
-                    enum:
-                    - Deployment
-                    - StatefulSet
-                    - HelmRelease
-                    type: string
-                  name:
-                    type: string
-                  namespace:
-                    type: string
-                required:
-                - kind
-                - name
-                type: object
-            required:
-            - gitPath
-            - kustomizationRef
-            type: object
-          status:
-            description: ManagedAppStatus defines the observed state of ManagedApp.
-            properties:
-              availableUpdate:
-                description: Available update information
+              skipSnapshot:
+                default: false
+                description: Skip snapshot creation (not recommended)
+                type: boolean
+              targetVersion:
+                description: Target version (optional - uses latest available if empty)
                 properties:
                   chart:
                     description: Chart version (for HelmRelease)
@@ -168,9 +91,22 @@ spec:
                       type: object
                     type: array
                 type: object
+            required:
+            - managedAppRef
+            type: object
+          status:
+            description: |-
+              UpgradeRequestStatus defines the observed state of UpgradeRequest
+              Progress is tracked via conditions (no phase field - following K8s API conventions)
+            properties:
               conditions:
-                description: conditions represent the current state of the ManagedApp
-                  resource.
+                description: |-
+                  Conditions represent the current state of the upgrade.
+                  The controller determines the current step by checking which conditions are set:
+                  - No conditions set: validation/suspend step
+                  - SnapshotReady=True, GitCommitted=False: committing step
+                  - GitCommitted=True, Healthy=False: health checking step
+                  - Complete=True: upgrade finished (check reason for success/failure)
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -229,58 +165,58 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              currentVersion:
-                description: Current version information
+              healthCheck:
+                description: Health check results
                 properties:
-                  chart:
-                    description: Chart version (for HelmRelease)
-                    type: string
-                  images:
-                    description: Image versions (for raw deployments or helm values)
-                    items:
-                      description: ImageInfo contains image version details
-                      properties:
-                        name:
-                          type: string
-                        tag:
-                          type: string
-                      required:
-                      - name
-                      - tag
-                      type: object
-                    type: array
-                type: object
-              lastUpgrade:
-                description: Last upgrade information
-                properties:
-                  fromVersion:
-                    description: VersionInfo contains version details
-                    properties:
-                      chart:
-                        description: Chart version (for HelmRelease)
-                        type: string
-                      images:
-                        description: Image versions (for raw deployments or helm values)
-                        items:
-                          description: ImageInfo contains image version details
-                          properties:
-                            name:
-                              type: string
-                            tag:
-                              type: string
-                          required:
-                          - name
-                          - tag
-                          type: object
-                        type: array
-                    type: object
-                  status:
-                    type: string
-                  timestamp:
+                  checkedAt:
+                    description: When health check was performed
                     format: date-time
                     type: string
-                  toVersion:
-                    description: VersionInfo contains version details
+                  message:
+                    description: Failure message if failed
+                    type: string
+                  status:
+                    description: 'Status: Passed, Failed, Pending'
+                    type: string
+                type: object
+              snapshot:
+                description: Snapshot information
+                properties:
+                  createdAt:
+                    description: When snapshots were created
+                    format: date-time
+                    type: string
+                  pvcSnapshots:
+                    description: PVC snapshots created
+                    items:
+                      description: PVCSnapshotInfo records a single PVC snapshot
+                      properties:
+                        pvcName:
+                          type: string
+                        snapshotName:
+                          type: string
+                      required:
+                      - pvcName
+                      - snapshotName
+                      type: object
+                    type: array
+                  readyAt:
+                    description: When snapshots became ready
+                    format: date-time
+                    type: string
+                type: object
+              upgrade:
+                description: Upgrade details
+                properties:
+                  completedAt:
+                    description: When upgrade completed
+                    format: date-time
+                    type: string
+                  gitCommit:
+                    description: Git commit SHA
+                    type: string
+                  newVersion:
+                    description: New version after upgrade
                     properties:
                       chart:
                         description: Chart version (for HelmRelease)
@@ -300,6 +236,31 @@ spec:
                           type: object
                         type: array
                     type: object
+                  previousVersion:
+                    description: Previous version before upgrade
+                    properties:
+                      chart:
+                        description: Chart version (for HelmRelease)
+                        type: string
+                      images:
+                        description: Image versions (for raw deployments or helm values)
+                        items:
+                          description: ImageInfo contains image version details
+                          properties:
+                            name:
+                              type: string
+                            tag:
+                              type: string
+                          required:
+                          - name
+                          - tag
+                          type: object
+                        type: array
+                    type: object
+                  startedAt:
+                    description: When upgrade started
+                    format: date-time
+                    type: string
                 type: object
             type: object
         type: object

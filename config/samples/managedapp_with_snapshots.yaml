@@ -1,0 +1,41 @@
+# ManagedApp with VolumeSnapshot configuration for pre-upgrade backups
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: gitea
+  namespace: default
+spec:
+  # Path in Git repo where this app's manifest lives
+  gitPath: "flux/apps/gitea/helmrelease.yaml"
+
+  # Reference to the Flux Kustomization that deploys this app
+  kustomizationRef:
+    name: apps
+    namespace: flux-system
+
+  # Explicit workload reference for health checks
+  workloadRef:
+    kind: HelmRelease
+    name: gitea
+    namespace: gitea
+
+  # Volume snapshot configuration for pre-upgrade backups
+  volumeSnapshots:
+    enabled: true
+    volumeSnapshotClassName: csi-snapclass
+    pvcs:
+      - name: data-gitea-0
+      - name: data-gitea-postgresql-0
+    retentionPolicy:
+      maxCount: 3
+      maxAge: "168h"  # 7 days
+
+  # Version policy
+  versionPolicy:
+    autoUpdate: none
+    # Optional: custom version path (defaults to spec.chart.spec.version for HelmRelease)
+    # versionPath: "spec.chart.spec.version"
+
+  # Health check timeout
+  healthCheck:
+    timeout: "10m"
