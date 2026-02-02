@@ -1,1 +1,14 @@
 CLAUDE.md
+
+# Build artifacts
+bin/
+cover.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store

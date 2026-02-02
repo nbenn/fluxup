@@ -1,0 +1,9 @@
+apiVersion: fluxup.fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  labels:
+    app.kubernetes.io/name: fluxup
+    app.kubernetes.io/managed-by: kustomize
+  name: managedapp-sample
+spec:
+  # TODO(user): Add fields here
