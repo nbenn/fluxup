@@ -43,9 +43,9 @@ type ManagedAppReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=fluxup.fluxup.dev,resources=managedapps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=fluxup.fluxup.dev,resources=managedapps/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=fluxup.fluxup.dev,resources=managedapps/finalizers,verbs=update
+// +kubebuilder:rbac:groups=fluxup.dev,resources=managedapps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=fluxup.dev,resources=managedapps/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=fluxup.dev,resources=managedapps/finalizers,verbs=update
 // +kubebuilder:rbac:groups=helm.toolkit.fluxcd.io,resources=helmreleases,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch

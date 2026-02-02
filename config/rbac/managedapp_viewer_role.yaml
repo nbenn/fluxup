@@ -1,7 +1,7 @@
 # This rule is not used by the project fluxup itself.
 # It is provided to allow the cluster admin to help manage permissions for users.
 #
-# Grants read-only access to fluxup.fluxup.dev resources.
+# Grants read-only access to fluxup.dev resources.
 # This role is intended for users who need visibility into these resources
 # without permissions to modify them. It is ideal for monitoring purposes and limited-access viewing.
 
@@ -14,7 +14,7 @@ metadata:
   name: managedapp-viewer-role
 rules:
 - apiGroups:
-  - fluxup.fluxup.dev
+  - fluxup.dev
   resources:
   - managedapps
   verbs:
@@ -22,7 +22,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - fluxup.fluxup.dev
+  - fluxup.dev
   resources:
   - managedapps/status
   verbs:

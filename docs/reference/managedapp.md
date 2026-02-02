@@ -10,7 +10,7 @@ The `ManagedApp` custom resource defines an application managed by FluxUp.
 ## API Version
 
 ```yaml
-apiVersion: fluxup.fluxup.dev/v1alpha1
+apiVersion: fluxup.dev/v1alpha1
 kind: ManagedApp
 ```
 
@@ -82,7 +82,7 @@ kind: ManagedApp
 ### HelmRelease-based App
 
 ```yaml
-apiVersion: fluxup.fluxup.dev/v1alpha1
+apiVersion: fluxup.dev/v1alpha1
 kind: ManagedApp
 metadata:
   name: gitea
@@ -105,7 +105,7 @@ spec:
 ### Deployment-based App
 
 ```yaml
-apiVersion: fluxup.fluxup.dev/v1alpha1
+apiVersion: fluxup.dev/v1alpha1
 kind: ManagedApp
 metadata:
   name: bazarr
@@ -126,7 +126,7 @@ spec:
 ### Minimal Configuration
 
 ```yaml
-apiVersion: fluxup.fluxup.dev/v1alpha1
+apiVersion: fluxup.dev/v1alpha1
 kind: ManagedApp
 metadata:
   name: simple-app

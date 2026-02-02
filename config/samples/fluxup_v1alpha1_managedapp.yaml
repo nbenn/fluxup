@@ -1,4 +1,4 @@
-apiVersion: fluxup.fluxup.dev/v1alpha1
+apiVersion: fluxup.dev/v1alpha1
 kind: ManagedApp
 metadata:
   labels:

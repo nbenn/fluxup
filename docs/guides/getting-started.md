@@ -36,7 +36,7 @@ kubectl apply -f https://github.com/nbenn/fluxup/releases/latest/download/instal
 Create a `ManagedApp` resource for each application you want FluxUp to manage:
 
 ```yaml
-apiVersion: fluxup.fluxup.dev/v1alpha1
+apiVersion: fluxup.dev/v1alpha1
 kind: ManagedApp
 metadata:
   name: my-app

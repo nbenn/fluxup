@@ -14,7 +14,7 @@ This guide covers all the configuration options available for FluxUp.
 The minimal configuration requires only `gitPath` and `kustomizationRef`:
 
 ```yaml
-apiVersion: fluxup.fluxup.dev/v1alpha1
+apiVersion: fluxup.dev/v1alpha1
 kind: ManagedApp
 metadata:
   name: my-app

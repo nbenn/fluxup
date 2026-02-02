@@ -32,7 +32,7 @@ kubectl apply -f https://github.com/nbenn/fluxup/releases/latest/download/instal
 ### Create a ManagedApp
 
 ```yaml
-apiVersion: fluxup.fluxup.dev/v1alpha1
+apiVersion: fluxup.dev/v1alpha1
 kind: ManagedApp
 metadata:
   name: my-app

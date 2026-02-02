@@ -22,7 +22,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - fluxup.fluxup.dev
+  - fluxup.dev
   resources:
   - managedapps
   verbs:
@@ -34,13 +34,13 @@ rules:
   - update
   - watch
 - apiGroups:
-  - fluxup.fluxup.dev
+  - fluxup.dev
   resources:
   - managedapps/finalizers
   verbs:
   - update
 - apiGroups:
-  - fluxup.fluxup.dev
+  - fluxup.dev
   resources:
   - managedapps/status
   verbs:
