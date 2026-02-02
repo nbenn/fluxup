@@ -138,17 +138,9 @@ All state is stored in Kubernetes objects (CRDs). This follows the Kubernetes-na
 └──────────────────┘               └──────────────────┘
 ```
 
-## Key Design Decision: Renovate Integration
+## Renovate Integration
 
-Instead of reimplementing version detection, we leverage [Renovate](https://docs.renovatebot.com/):
-
-### Why Renovate?
-
-1. **Mature & Battle-tested** - Supports 90+ package managers, handles edge cases
-2. **Flux-native support** - Has a dedicated [Flux manager](https://docs.renovatebot.com/modules/manager/flux/) that understands HelmRelease ↔ HelmRepository relationships
-3. **Registry authentication** - Already handles private registries, OCI, etc.
-4. **Semver handling** - Proper version constraint parsing and comparison
-5. **No wheel reinvention** - Version detection is complex; Renovate solved it
+FluxUp uses [Renovate](https://docs.renovatebot.com/) for version detection. Renovate has a dedicated [Flux manager](https://docs.renovatebot.com/modules/manager/flux/) that understands HelmRelease ↔ HelmRepository relationships, handles private registries, and supports 90+ package managers.
 
 ### How We Use Renovate (Without PRs)
 
