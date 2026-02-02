@@ -1,5 +1,8 @@
 # FluxUp - Upgrade Controller
 
+[![CI](https://github.com/nbenn/fluxup/actions/workflows/ci.yml/badge.svg)](https://github.com/nbenn/fluxup/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/nbenn/fluxup/graph/badge.svg)](https://codecov.io/gh/nbenn/fluxup)
+
 A custom Kubernetes controller with web UI for managing application lifecycle in GitOps-based clusters. The controller leverages **Renovate** for version detection, commits updates to **Git** (source of truth), creates **CSI snapshots** before upgrades, and provides a UI for monitoring and rollback.
 
 ---
