@@ -1,0 +1,12 @@
+apiVersion: fluxup.fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: simple-app
+  namespace: default
+spec:
+  # Minimal config: just gitPath and kustomizationRef
+  # Health is determined by Kustomization status only
+  gitPath: "flux/apps/simple-app/kustomization.yaml"
+  kustomizationRef:
+    name: apps
+    namespace: flux-system

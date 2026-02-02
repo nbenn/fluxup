@@ -1,0 +1,23 @@
+apiVersion: fluxup.fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: bazarr
+  namespace: default
+spec:
+  # Path in Git repo where this app's manifest lives
+  gitPath: "flux/apps/bazarr/deployment.yaml"
+
+  # Reference to the Flux Kustomization that deploys this app
+  kustomizationRef:
+    name: apps
+    namespace: flux-system
+
+  # Explicit workload reference for health checks
+  workloadRef:
+    kind: Deployment
+    name: bazarr
+    namespace: media
+
+  # Allow automatic patch updates
+  versionPolicy:
+    autoUpdate: patch

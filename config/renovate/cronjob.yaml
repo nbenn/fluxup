@@ -1,0 +1,106 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: renovate-lookup
+  namespace: fluxup-system
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: renovate-lookup
+          containers:
+            - name: renovate
+              image: renovate/renovate:latest
+              env:
+                - name: RENOVATE_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: renovate-credentials
+                      key: token
+                - name: LOG_LEVEL
+                  value: info
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+
+                  # Run Renovate in dry-run lookup mode
+                  renovate \
+                    --platform=gitea \
+                    --endpoint="${GITEA_URL}/api/v1" \
+                    --dry-run=lookup \
+                    "${GITEA_REPO}" 2>&1 | tee /tmp/renovate.log
+
+                  # Extract updates JSON (the packageFiles log entry)
+                  grep -E '"packageFiles"' /tmp/renovate.log | head -1 > /tmp/updates.json || echo '{}' > /tmp/updates.json
+
+                  # Update the ConfigMap using kubectl
+                  kubectl create configmap fluxup-updates \
+                    --from-file=updates.json=/tmp/updates.json \
+                    --namespace=fluxup-system \
+                    --dry-run=client -o yaml | kubectl apply -f -
+
+                  echo "Updates ConfigMap updated successfully"
+              envFrom:
+                - configMapRef:
+                    name: renovate-env
+          volumes: []
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: renovate-env
+  namespace: fluxup-system
+data:
+  GITEA_URL: "https://gitea.example.com"
+  GITEA_REPO: "user/manifests"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: renovate-credentials
+  namespace: fluxup-system
+type: Opaque
+stringData:
+  token: "replace-with-your-token"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: renovate-lookup
+  namespace: fluxup-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: renovate-lookup
+  namespace: fluxup-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+    resourceNames: ["fluxup-updates"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: renovate-lookup
+  namespace: fluxup-system
+subjects:
+  - kind: ServiceAccount
+    name: renovate-lookup
+    namespace: fluxup-system
+roleRef:
+  kind: Role
+  name: renovate-lookup
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,27 @@
+apiVersion: fluxup.fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: gitea
+  namespace: default
+spec:
+  # Path in Git repo where this app's manifest lives
+  gitPath: "flux/apps/gitea/helmrelease.yaml"
+
+  # Reference to the Flux Kustomization that deploys this app
+  kustomizationRef:
+    name: apps
+    namespace: flux-system
+
+  # Explicit workload reference for health checks
+  workloadRef:
+    kind: HelmRelease
+    name: gitea
+    namespace: gitea
+
+  # Version policy (none = manual upgrades only)
+  versionPolicy:
+    autoUpdate: none
+
+  # Health check timeout
+  healthCheck:
+    timeout: "10m"
