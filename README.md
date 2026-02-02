@@ -4,33 +4,6 @@ A custom Kubernetes controller with web UI for managing application lifecycle in
 
 ---
 
-## Why FluxUp?
-
-FluxUp fills a gap in the GitOps ecosystem by combining capabilities that currently require cobbling together multiple disconnected tools.
-
-### Comparison with Existing Tools
-
-| Capability | Renovate | Velero | Weave GitOps | FluxUp |
-|:-----------|:--------:|:------:|:------------:|:------:|
-| Detect available updates | ✅ | ❌ | ❌ | ✅ |
-| Pre-upgrade snapshots | ❌ | ⚠️ Manual | ❌ | ✅ Auto |
-| One-click upgrade from UI | ❌ | ❌ | ❌ | ✅ |
-| Flux suspend/resume orchestration | ❌ | ❌ | ❌ | ✅ |
-| Direct Git commit (no PR) | ❌ | ❌ | ❌ | ✅ |
-| Snapshot-based rollback | ❌ | ⚠️ DR-focused | ❌ | ✅ |
-| Unified workflow | ❌ | ❌ | ❌ | ✅ |
-
-**Legend:** ✅ = Full support | ⚠️ = Partial/manual | ❌ = Not supported
-
-### What Makes FluxUp Different
-
-- **Renovate** creates PRs — FluxUp detects updates without PRs and commits directly
-- **Velero** is disaster recovery focused — FluxUp ties snapshots to the upgrade workflow
-- **Weave GitOps** provides visibility — FluxUp adds actionable upgrade management
-- **Flux Image Automation** only handles container images — FluxUp handles Helm charts too
-
----
-
 ## Prerequisites
 
 ### Required Cluster Components
@@ -119,43 +92,47 @@ All state is stored in Kubernetes objects (CRDs). This follows the Kubernetes-na
 ## Architecture
 
 ```
-┌───────────────────────────────────────────────────────────────────────┐
-│                                                                       │
-│  ┌─────────────┐    ┌───────────────────────────────────────────────┐│
-│  │  Renovate   │    │           Upgrade Controller                  ││
-│  │  (CronJob)  │    │  ┌─────────────────┐  ┌────────────────────┐  ││
-│  │             │    │  │ Upgrade Manager │  │   Web UI Server    │  ││
-│  │ - dryRun=   │───>│  │                 │  │                    │  ││
-│  │   lookup    │    │  │ - Parse updates │  │ - List pending     │  ││
-│  │ - JSON logs │    │  │ - Create snap   │  │ - Trigger upgrade  │  ││
-│  │ - Scheduled │    │  │ - Commit to Git │  │ - View status      │  ││
-│  └─────────────┘    │  │ - Monitor Flux  │  │ - Rollback         │  ││
-│                     │  └────────┬────────┘  └──────────┬─────────┘  ││
-│                     │           │                      │            ││
-│                     │           v                      v            ││
-│                     │  ┌────────────────────────────────────────┐   ││
-│                     │  │          Reconciliation Loop           │   ││
-│                     │  │  Watches: ManagedApp, HelmRelease,     │   ││
-│                     │  │           VolumeSnapshot, Git commits  │   ││
-│                     │  └────────────────────────────────────────┘   ││
-│                     └───────────────────────────────────────────────┘│
-└───────────────────────────────────────────────────────────────────────┘
-        │                              │
-        │                              v
-        │              ┌───────────────────────────────┐
-        │              │        Kubernetes API         │
-        │              │  ┌───────────┐ ┌───────────┐  │
-        │              │  │HelmRelease│ │VolSnapshot│  │
-        │              │  └───────────┘ └───────────┘  │
-        │              └───────────────────────────────┘
-        │                              │
-        v                              v
-┌─────────────────┐          ┌─────────────────┐
-│   Git Server    │<─────────│      Flux       │
-│  (Gitea, etc.)  │  watches │                 │
-│ - HelmReleases  │─────────>│ - Reconciles    │
-│ - Deployments   │          │ - Applies       │
-└─────────────────┘          └─────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│  ┌────────────────┐     ┌──────────────────────────────────────────────────┐ │
+│  │   Renovate     │     │              Upgrade Controller                  │ │
+│  │   (CronJob)    │     │                                                  │ │
+│  │                │     │  ┌──────────────────┐   ┌─────────────────────┐  │ │
+│  │  - dryRun=     │     │  │  Upgrade Manager │   │   Web UI Server     │  │ │
+│  │    lookup      │────>│  │                  │   │                     │  │ │
+│  │  - JSON logs   │     │  │  - Parse updates │   │  - List pending     │  │ │
+│  │  - Scheduled   │     │  │  - Create snap   │   │  - Trigger upgrade  │  │ │
+│  │                │     │  │  - Commit to Git │   │  - View status      │  │ │
+│  └────────────────┘     │  │  - Monitor Flux  │   │  - Rollback         │  │ │
+│                         │  └────────┬─────────┘   └──────────┬──────────┘  │ │
+│                         │           │                        │             │ │
+│                         │           v                        v             │ │
+│                         │  ┌─────────────────────────────────────────────┐ │ │
+│                         │  │            Reconciliation Loop              │ │ │
+│                         │  │   Watches: ManagedApp, HelmRelease,         │ │ │
+│                         │  │            VolumeSnapshot, Git commits      │ │ │
+│                         │  └─────────────────────────────────────────────┘ │ │
+│                         └──────────────────────────────────────────────────┘ │
+│                                              │                               │
+└──────────────────────────────────────────────┼───────────────────────────────┘
+         │                                     │
+         │                                     v
+         │                     ┌───────────────────────────────────┐
+         │                     │         Kubernetes API            │
+         │                     │                                   │
+         │                     │  ┌─────────────┐ ┌─────────────┐  │
+         │                     │  │ HelmRelease │ │ VolSnapshot │  │
+         │                     │  └─────────────┘ └─────────────┘  │
+         │                     └───────────────────────────────────┘
+         │                                     │
+         v                                     v
+┌──────────────────┐               ┌──────────────────┐
+│   Git Server     │<──────────────│      Flux        │
+│   (Gitea, etc.)  │    watches    │                  │
+│                  │──────────────>│  - Reconciles    │
+│  - HelmReleases  │               │  - Applies       │
+│  - Deployments   │               │                  │
+└──────────────────┘               └──────────────────┘
 ```
 
 ## Key Design Decision: Renovate Integration
@@ -733,6 +710,8 @@ func (d *PVCDiscoverer) DiscoverPVCs(ctx context.Context, hr *helmv2.HelmRelease
 ---
 
 ## Web UI
+
+Inspired by the [Flux Operator Web UI](https://fluxoperator.dev/web-ui/).
 
 ### Technology Stack
 
