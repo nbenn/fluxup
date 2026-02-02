@@ -195,7 +195,7 @@ When user approves an upgrade in our UI:
 The primary CRD that defines an application to be managed by the upgrade controller.
 
 ```yaml
-apiVersion: upgrades.example.com/v1alpha1
+apiVersion: fluxup.dev/v1alpha1
 kind: ManagedApp
 metadata:
   name: my-app
@@ -206,12 +206,20 @@ spec:
     name: my-app
     namespace: my-app
 
-  # PVCs to snapshot before upgrade (auto-detected if empty)
+  # Reference to the Kustomization that owns the HelmRelease
+  # Used to suspend/resume during upgrades
+  kustomizationRef:
+    name: my-app
+    namespace: flux-system
+
+  # PVCs to snapshot before upgrade
   volumeSnapshots:
     enabled: true
     volumeSnapshotClassName: csi-snapclass
-    # Explicit PVC list (optional - auto-detect from HelmRelease if empty)
-    pvcs: []
+    # Explicit list of PVCs to snapshot (required)
+    pvcs:
+      - name: data-my-app-0
+      - name: data-my-app-postgresql-0
     # How long to keep pre-upgrade snapshots
     retentionPolicy:
       keepLast: 3
@@ -231,15 +239,6 @@ spec:
       - name: example/app
         autoUpdate: patch
         constraint: ">=1.21.0"
-
-  # Notification settings
-  notifications:
-    # Notify when new version is available
-    onAvailable: true
-    # Notify after upgrade completes
-    onUpgrade: true
-    # Notify on upgrade failure
-    onFailure: true
 
   # Health check after upgrade
   healthCheck:
@@ -296,7 +295,7 @@ status:
 Represents an upgrade operation (created by user via UI or kubectl).
 
 ```yaml
-apiVersion: upgrades.example.com/v1alpha1
+apiVersion: fluxup.dev/v1alpha1
 kind: UpgradeRequest
 metadata:
   name: my-app-upgrade-20240115
@@ -355,7 +354,7 @@ status:
 Represents a rollback operation.
 
 ```yaml
-apiVersion: upgrades.example.com/v1alpha1
+apiVersion: fluxup.dev/v1alpha1
 kind: RollbackRequest
 metadata:
   name: my-app-rollback-20240115
@@ -803,7 +802,6 @@ func (d *PVCDiscoverer) DiscoverPVCs(ctx context.Context, hr *helmv2.HelmRelease
 - Confirm rollback
 
 #### Settings
-- Global notification settings
 - Default version policies
 - Snapshot retention defaults
 - Git backend configuration
@@ -825,47 +823,14 @@ GET  /api/upgrades/:ns/:name      # Get UpgradeRequest status
 GET  /api/snapshots/:ns           # List snapshots in namespace
 DELETE /api/snapshots/:ns/:name   # Delete snapshot
 
-GET  /api/notifications           # List recent notifications
 PUT  /api/settings                # Update global settings
 
 # WebSocket for real-time updates
 WS   /api/ws                      # Real-time status updates
+
+# Prometheus metrics
+GET  /metrics                     # Prometheus metrics endpoint
 ```
-
----
-
-## Notifications
-
-### Supported Channels
-
-- **Slack/Discord** via webhook
-- **Email** via SMTP
-- **Gotify/ntfy** for push notifications
-- **Flux Notification Controller** integration (send events that Flux can forward)
-
-### Notification Events
-
-1. **Update Available**
-   - App name, current version, new version
-   - Link to UI for upgrade
-
-2. **Upgrade Started**
-   - App name, target version
-   - Triggered by (user or automation)
-
-3. **Upgrade Completed**
-   - App name, old → new version
-   - Duration
-   - Link to verify
-
-4. **Upgrade Failed**
-   - App name, target version
-   - Error message
-   - Link to rollback
-
-5. **Rollback Completed**
-   - App name, restored version
-   - Snapshot used
 
 ---
 
@@ -888,14 +853,8 @@ User clicks "Upgrade" in UI
               │
               ▼
 ┌───────────────────────────┐
-│ Discover PVCs             │
-│ (from HelmRelease)        │
-└─────────────┬─────────────┘
-              │
-              ▼
-┌───────────────────────────┐
 │ Create VolumeSnapshots    │◀── status: Snapshotting
-│ for each PVC              │
+│ for each configured PVC   │
 └─────────────┬─────────────┘
               │
               ▼
@@ -941,9 +900,9 @@ User clicks "Upgrade" in UI
        ▼             ▼
 ┌───────────┐ ┌─────────────┐
 │ Completed │ │ Failed      │
-│           │ │ (notify,    │
-│ Notify    │ │  await      │
-│ Cleanup   │ │  rollback)  │
+│           │ │             │
+│ Cleanup   │ │ Await       │
+│           │ │ rollback    │
 └───────────┘ └─────────────┘
 ```
 
@@ -1013,7 +972,6 @@ User clicks "Rollback" (or auto-triggered on failure)
               ▼
 ┌───────────────────────────┐
 │ Wait for Ready            │◀── status: Completed
-│ Notify completion         │
 └───────────────────────────┘
 ```
 
@@ -1178,9 +1136,9 @@ upgrade-controller/
 ├── config/
 │   ├── crd/
 │   │   └── bases/
-│   │       ├── upgrades.example.com_managedapps.yaml
-│   │       ├── upgrades.example.com_upgraderequests.yaml
-│   │       └── upgrades.example.com_rollbackrequests.yaml
+│   │       ├── fluxup.dev_managedapps.yaml
+│   │       ├── fluxup.dev_upgraderequests.yaml
+│   │       └── fluxup.dev_rollbackrequests.yaml
 │   ├── rbac/
 │   │   ├── role.yaml
 │   │   └── role_binding.yaml
@@ -1211,7 +1169,7 @@ metadata:
   name: upgrade-controller
 rules:
   # ManagedApp, UpgradeRequest, RollbackRequest (own CRDs)
-  - apiGroups: ["upgrades.example.com"]
+  - apiGroups: ["fluxup.dev"]
     resources: ["*"]
     verbs: ["*"]
 
@@ -1311,10 +1269,10 @@ spec:
       url: https://git.example.com
       # token from Secret
 
-    notifications:
-      slack:
-        enabled: false
-        # webhookUrl from Secret
+    metrics:
+      enabled: true
+      serviceMonitor:
+        enabled: false  # Enable if using Prometheus Operator
 
     config:
       defaultSnapshotClass: csi-snapclass
@@ -1333,128 +1291,42 @@ spec:
 - [ ] Renovate CronJob setup with `dryRun=lookup`
 - [ ] Renovate output parser (JSON → UpdateInfo)
 - [ ] Update ManagedApp status with available updates
+- [ ] Structured JSON logging
 
 ### Phase 2: Upgrade Workflow
 - [ ] UpgradeRequest CRD and controller
 - [ ] Git manager interface + Gitea implementation
 - [ ] VolumeSnapshot creation before upgrade
-- [ ] Flux suspend/resume integration
-- [ ] Basic status reporting and events
+- [ ] Flux Kustomization suspend/resume integration
+- [ ] Health check after upgrade (wait for HelmRelease Ready)
 
-### Phase 3: Web UI (MVP)
-- [ ] Embedded HTTP server
-- [ ] List ManagedApps with update status
-- [ ] Trigger upgrade via UI
-- [ ] Upgrade progress/status page
-- [ ] OIDC authentication
-
-### Phase 4: Rollback
+### Phase 3: Rollback Workflow
 - [ ] RollbackRequest CRD and controller
 - [ ] PVC restore from VolumeSnapshot
 - [ ] Git revert functionality
-- [ ] Rollback UI page
+- [ ] Workload scale down/up orchestration
 
-### Phase 5: Notifications & Polish
-- [ ] Notification system (Slack, webhook, ntfy)
-- [ ] Changelog links (fetch from GitHub releases, etc.)
+### Phase 4: Web UI
+- [ ] Embedded HTTP server
+- [ ] List ManagedApps with update status
+- [ ] Trigger upgrade via UI
+- [ ] Trigger rollback via UI
+- [ ] Upgrade/rollback progress view
+- [ ] OIDC authentication
+
+### Phase 5: Observability
+- [ ] Prometheus metrics endpoint (`/metrics`)
+- [ ] Key metrics: upgrades total, duration, failures, available updates gauge
 - [ ] Snapshot retention/cleanup automation
-- [ ] Settings page in UI
-- [ ] Improved error handling and recovery
 
 ### Phase 6: Advanced Features
 - [ ] Additional Git backends (GitHub, GitLab, generic)
+- [ ] On-demand Renovate scan (trigger update check from UI)
 - [ ] Bulk upgrades (upgrade all with available updates)
+- [ ] Multi-HelmRelease apps (group related releases, e.g., app + database)
 - [ ] Dependency ordering (upgrade A before B)
 - [ ] Version pinning/skipping in UI
-- [ ] Metrics and Prometheus integration
-- [ ] Grafana dashboard
-
----
-
-## Alternatives Considered
-
-### Version Detection
-
-| Approach | Pros | Cons | Decision |
-|:---------|:-----|:-----|:--------:|
-| Custom implementation | Full control, no dependencies | Reinventing the wheel, many edge cases | ❌ |
-| Flux Image Automation | Native Flux integration | Only for images, not Helm charts | ❌ |
-| Renovate with PRs | Standard workflow, review process | Requires manual PR merge, slower | ❌ |
-| **Renovate dryRun=lookup** | Mature detection, no PRs, JSON output | Extra component (Node.js) | ✅ |
-
-### Git Updates
-
-| Approach | Pros | Cons | Decision |
-|:---------|:-----|:-----|:--------:|
-| Direct K8s API update | Simple, fast | Git out of sync, not GitOps | ❌ |
-| Renovate create PR | Standard, reviewable | Requires merge step, slower | ❌ |
-| **Direct Git commit** | True GitOps, fast, atomic | Needs Git credentials | ✅ |
-
-### Snapshot Timing
-
-| Approach | Pros | Cons | Decision |
-|:---------|:-----|:-----|:--------:|
-| Rely on scheduled backups | Already exists | May not be recent enough | ❌ |
-| Snapshot after Git commit | Simpler flow | Race with Flux, might miss | ❌ |
-| **Snapshot before Git commit + suspend Flux** | Guaranteed pre-upgrade state | More complex | ✅ |
-
-### YAML Editing
-
-| Approach | Pros | Cons | Decision |
-|:---------|:-----|:-----|:--------:|
-| Unmarshal/Marshal (naive) | Simple | Loses comments, changes formatting | ❌ |
-| Regex replacement | No formatting changes | Fragile, no structure awareness | ⚠️ |
-| yq CLI | Good preservation | External dependency, slower | ❌ |
-| **kyaml (Kustomize)** | Battle-tested by Flux, Go-native | Rare edge cases | ✅ |
-
-### State Storage
-
-| Approach | Pros | Cons | Decision |
-|:---------|:-----|:-----|:--------:|
-| PostgreSQL | Rich queries, transactions | Extra dependency, operational overhead | ❌ |
-| SQLite | Simple, embedded | Not HA, backup complexity | ❌ |
-| Redis | Fast, pub/sub | Volatile, another component | ❌ |
-| **Kubernetes CRDs** | Native, GitOps-friendly, no extra deps | Limited queries | ✅ |
-
----
-
-## Open Questions
-
-1. ~~**Git integration**~~: ✅ Resolved - Use Renovate for detection, commit directly to Git for upgrades
-
-2. **Renovate execution model**: Run as:
-   - Sidecar container (always running, periodic checks)?
-   - CronJob (scheduled, separate pod)?
-   - On-demand (triggered by controller when user requests update check)?
-
-   *Recommendation*: CronJob (e.g., hourly) that writes output to a PVC or ConfigMap that the controller reads.
-
-3. ~~**Image tag detection**~~: ✅ Resolved - Renovate handles this well:
-   - **Semver tags** (`v1.2.3`, `1.2.3`): Normal version comparison
-   - **`latest` tags**: Renovate can pin to digest and track actual changes
-   - **Rolling tags** (`develop`, `main`): Pin to digest for reproducibility
-
-4. **Multi-instance apps**: How to handle apps with multiple HelmReleases (e.g., app + database)?
-   - Option A: Group them in a single ManagedApp with multiple HelmRelease refs
-   - Option B: Separate ManagedApps with dependency ordering
-
-5. **Flux suspension granularity**: Suspend Kustomization or HelmRelease?
-   - HelmRelease: More granular, only affects one app
-   - Kustomization: Might be needed if HelmRelease is created by Kustomization
-
-   *Recommendation*: Suspend HelmRelease directly when possible
-
-6. **Snapshot naming convention**:
-   - Proposed: `{app}-{pvc-short-name}-{timestamp}`
-   - Example: `my-app-data-20240115-143000`
-
-7. **Git authentication**: How to pass tokens for different backends?
-   - Mount as Secret
-   - Use external secrets operator if available
-
-8. **Concurrent upgrades**: Allow multiple apps to upgrade simultaneously, or serialize?
-   - Serialize is safer (easier to debug failures)
-   - Parallel is faster for bulk updates
+- [ ] PVC auto-discovery from HelmRelease labels/selectors
 
 ---
 
