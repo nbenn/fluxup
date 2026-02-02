@@ -3,6 +3,10 @@ CLAUDE.md
 # Build artifacts
 bin/
 cover.out
+web/
+
+# Docs build dependencies
+docs/node_modules/
 
 # IDE
 .idea/

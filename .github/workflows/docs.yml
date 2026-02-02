@@ -1,0 +1,100 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create Starlight project
+        run: |
+          npm create astro@latest site -- --template starlight --no-install --no-git -y
+
+      - name: Configure Starlight
+        run: |
+          cat > site/astro.config.mjs << 'EOF'
+          import { defineConfig } from 'astro/config';
+          import starlight from '@astrojs/starlight';
+
+          export default defineConfig({
+            site: 'https://nbenn.github.io',
+            base: '/fluxup',
+            integrations: [
+              starlight({
+                title: 'FluxUp',
+                social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/nbenn/fluxup' }],
+                sidebar: [
+                  { label: 'Home', link: '/' },
+                  {
+                    label: 'Guides',
+                    items: [
+                      { label: 'Getting Started', link: '/guides/getting-started/' },
+                      { label: 'Configuration', link: '/guides/configuration/' },
+                      { label: 'Renovate Integration', link: '/guides/renovate/' },
+                    ],
+                  },
+                  {
+                    label: 'Reference',
+                    items: [
+                      { label: 'ManagedApp CRD', link: '/reference/managedapp/' },
+                    ],
+                  },
+                ],
+              }),
+            ],
+          });
+          EOF
+
+      - name: Copy docs content
+        run: |
+          rm -rf site/src/content/docs/*
+          cp docs/index.md site/src/content/docs/
+          cp -r docs/guides site/src/content/docs/
+          cp -r docs/reference site/src/content/docs/
+
+      - name: Install dependencies
+        working-directory: site
+        run: npm install
+
+      - name: Build site
+        working-directory: site
+        run: npm run build
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
