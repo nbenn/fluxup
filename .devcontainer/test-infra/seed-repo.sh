@@ -42,8 +42,10 @@ trap "rm -rf ${TEMP_DIR}" EXIT
 
 cd "${TEMP_DIR}"
 
-# Clone the repo
-git clone "http://${GITEA_OWNER}:${GITEA_PASSWORD}@localhost:3000/${GITEA_OWNER}/${GITEA_REPO}.git" repo 2>/dev/null
+# Clone the repo (extract host:port from GITEA_URL)
+GITEA_HOST="${GITEA_URL#http://}"
+GITEA_HOST="${GITEA_HOST#https://}"
+git clone "http://${GITEA_OWNER}:${GITEA_PASSWORD}@${GITEA_HOST}/${GITEA_OWNER}/${GITEA_REPO}.git" repo 2>/dev/null
 cd repo
 
 # Create directory structure

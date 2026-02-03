@@ -6,12 +6,28 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GITEA_CONTAINER="fluxup-gitea-test"
-GITEA_PORT="${GITEA_PORT:-3000}"
 GITEA_ADMIN_USER="fluxup"
 GITEA_ADMIN_PASSWORD="fluxup123"
 GITEA_ADMIN_EMAIL="fluxup@test.local"
 
-echo "==> Starting Gitea test instance..."
+# Find an available port if not specified
+find_free_port() {
+    local port="${1:-3000}"
+    while nc -z localhost "$port" 2>/dev/null || lsof -i :"$port" >/dev/null 2>&1; do
+        port=$((port + 1))
+        if [ "$port" -gt 4000 ]; then
+            echo "ERROR: Could not find free port between 3000-4000" >&2
+            exit 1
+        fi
+    done
+    echo "$port"
+}
+
+if [ -z "${GITEA_PORT:-}" ]; then
+    GITEA_PORT=$(find_free_port 3000)
+fi
+
+echo "==> Starting Gitea test instance on port ${GITEA_PORT}..."
 
 # Check if already running
 if docker ps --format '{{.Names}}' | grep -q "^${GITEA_CONTAINER}$"; then
