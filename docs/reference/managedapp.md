@@ -45,7 +45,7 @@ kind: ManagedApp
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `autoUpdate` | string | `none` | One of: `none`, `patch`, `minor`, `major` |
-| `versionPath` | string | | YAML path to version field (defaults to `spec.chart.spec.version` for HelmRelease) |
+| `versionPath` | string | | YAML path to version field. Defaults to `spec.chart.spec.version` for chart updates. **Required** for image updates. |
 
 ### HealthCheckConfig
 
@@ -103,7 +103,7 @@ spec:
     timeout: "10m"
 ```
 
-### Deployment-based App
+### Image Updates via HelmRelease Values
 
 ```yaml
 apiVersion: fluxup.dev/v1alpha1
@@ -112,16 +112,17 @@ metadata:
   name: bazarr
   namespace: default
 spec:
-  gitPath: "flux/apps/bazarr/deployment.yaml"
+  gitPath: "flux/apps/bazarr/helmrelease.yaml"
   kustomizationRef:
     name: apps
     namespace: flux-system
   workloadRef:
-    kind: Deployment
+    kind: HelmRelease
     name: bazarr
     namespace: media
   versionPolicy:
     autoUpdate: patch
+    versionPath: "spec.values.image.tag"  # Required for image updates
 ```
 
 ### With Volume Snapshots
@@ -149,7 +150,6 @@ spec:
       - name: data-gitea-postgresql-0
     retentionPolicy:
       maxCount: 3
-      maxAge: "168h"
   healthCheck:
     timeout: "10m"
 ```

@@ -98,7 +98,7 @@ spec:
     name: my-app
 ```
 
-### Upgrade to Specific Version
+### Upgrade to Specific Chart Version
 
 ```yaml
 apiVersion: fluxup.dev/v1alpha1
@@ -111,6 +111,23 @@ spec:
     name: gitea
   targetVersion:
     chart: "11.0.0"
+```
+
+### Upgrade to Specific Image Version
+
+```yaml
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: bazarr-upgrade
+  namespace: default
+spec:
+  managedAppRef:
+    name: bazarr
+  targetVersion:
+    images:
+      - name: bazarr
+        tag: "v1.5.0"
 ```
 
 ### Dry Run

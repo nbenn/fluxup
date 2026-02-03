@@ -1017,6 +1017,23 @@ I recommend implementing in this order:
 
 ---
 
+## Implementation Status
+
+Phase 1 is **complete**. All planned functionality has been implemented:
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Project scaffolding | ✅ Complete | Kubebuilder v4, Go 1.23 |
+| ManagedApp CRD | ✅ Complete | Full spec with workloadRef, versionPolicy, volumeSnapshots |
+| ManagedApp controller | ✅ Complete | Watches workloads, updates Ready condition |
+| Renovate parser | ✅ Complete | Parses JSON from ConfigMap |
+| Update mapper | ✅ Complete | Maps updates to ManagedApps by gitPath |
+| Status updater | ✅ Complete | Sets availableUpdate and UpdateAvailable condition |
+| Renovate CronJob manifests | ✅ Complete | config/renovate/ directory |
+| Unit tests | ✅ Complete | Parser, mapper, controller tests |
+
+---
+
 ## Resolved Decisions
 
 | Decision | Choice |
@@ -1045,16 +1062,19 @@ I recommend implementing in this order:
 
 ---
 
-## Next Steps After Phase 1
+## Next Steps
 
-Once Phase 1 is complete, we'll have:
-- A working CRD and controller
-- Renovate detecting updates
+Phase 1 delivered:
+- ManagedApp CRD and controller
+- Renovate integration for update detection
 - ManagedApp statuses showing available updates
 
-Phase 2 will add:
-- UpgradeRequest CRD
+Phase 2 added:
+- UpgradeRequest CRD and controller
 - Git manager (Gitea API)
-- Snapshot creation
-- Flux suspend/resume
-- The actual upgrade workflow
+- VolumeSnapshot creation with retention policy
+- Flux Kustomization suspend/resume
+- Chart and image version updates
+- Health checks and failure recovery
+
+See [Phase 2 Implementation Plan](phase2.md) for details.

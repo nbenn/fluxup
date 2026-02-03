@@ -724,10 +724,12 @@ type SnapshotInfo struct {
 }
 ```
 
-### 4.2 Retention Policy (Future)
+### 4.2 Retention Policy
+
+> **Implementation Note:** The design below shows both `maxCount` and `maxAge`. During implementation, we simplified to **`maxCount` only** (generational approach). See "Design Changes During Implementation" in the Implementation Status section.
 
 ```go
-// internal/snapshot/retention.go
+// internal/snapshot/retention.go (ORIGINAL DESIGN - simplified in implementation)
 
 // ApplyRetentionPolicy cleans up old snapshots based on policy
 func (m *Manager) ApplyRetentionPolicy(ctx context.Context, appName, namespace string, policy *RetentionPolicy) error {
@@ -1690,6 +1692,8 @@ E2E tests require:
 
 ## Step 10: Sample Resources
 
+> **Implementation Note:** These samples show the original design. The actual implementation simplified `retentionPolicy` to only use `maxCount` (no `maxAge`). See actual samples in `config/samples/`.
+
 ### 10.1 ManagedApp with Snapshots
 
 ```yaml
@@ -1714,8 +1718,7 @@ spec:
       - name: data-my-app-0
       - name: data-my-app-postgresql-0
     retentionPolicy:
-      maxCount: 3
-      maxAge: "168h"
+      maxCount: 3  # maxAge removed in implementation
   healthCheck:
     timeout: "5m"
 ```
@@ -1825,65 +1828,68 @@ The new version is in Git. Resuming would apply the (possibly broken) new versio
 
 ---
 
-## Future Enhancements
+## Implementation Status
 
-Ideas discussed but deferred for simplicity in Phase 2:
+Phase 2 is **complete**. All core functionality has been implemented:
 
-### Multi-file Atomic Commits
-Current approach: single-file manifests only. Gitea API doesn't support atomic multi-file commits.
+| Component | Status | Notes |
+|-----------|--------|-------|
+| UpgradeRequest CRD | ✅ Complete | Full spec with targetVersion, skipSnapshot, dryRun |
+| UpgradeRequest controller | ✅ Complete | Condition-driven state machine |
+| Git manager interface | ✅ Complete | `git.Manager` interface with Gitea implementation |
+| Gitea backend | ✅ Complete | Read, commit via Gitea API |
+| VolumeSnapshot creation | ✅ Complete | Pre-upgrade snapshots with readiness waiting |
+| Snapshot retention | ✅ Complete | Generational approach (maxCount per PVC) |
+| Flux suspend/resume | ✅ Complete | Kustomization suspend before commit, resume after |
+| YAML editor | ✅ Complete | kyaml-based, preserves comments |
+| Chart version updates | ✅ Complete | Default path `spec.chart.spec.version` |
+| Image tag updates | ✅ Complete | Custom `versionPath` required |
+| Health check | ✅ Complete | Wait for workload Ready condition |
+| Dry run mode | ✅ Complete | Validation only |
+| Failure recovery | ✅ Complete | Auto-resume Kustomization on failure |
+| Unit tests | ✅ Complete | Controller, git, snapshot, yaml tests |
+| E2E tests | ⚠️ Scaffolded | Framework in place, tests need expansion |
+| GitHub/GitLab backends | ❌ Deferred | Gitea only for now |
 
-Future options:
-- Use git CLI (clone, edit, commit, push) for atomic multi-file updates
-- Explore deeper Renovate integration if their architecture becomes more modular
+### Design Changes During Implementation
 
-### Smarter Version Path Detection
-Current approach: `versionPath` is a config field, with defaults for HelmRelease.
+1. **Snapshot Retention**: Changed from time-based (`maxAge`) to generational (`maxCount`). Simpler, more predictable - prunes after each successful upgrade.
 
-Future options:
-- Parse Renovate output to auto-detect where versions are defined
-- Support multiple paths per ManagedApp for complex manifests
+2. **Image Updates**: Reused `versionPath` field for both chart versions and image tags instead of separate config. Image updates require explicit `versionPath` (no default).
 
-### Richer Dry Run
-Current approach: validate only (ManagedApp exists, update available, path valid).
-
-Future options:
-- Create snapshot but don't commit (test snapshot infrastructure)
-- Full simulation with detailed report of each step
-
----
-
-## Phase 2 Future Work
-
-Items identified during Phase 2 implementation that are deferred:
-
-### Multi-Image Updates
-Current approach: one version path per ManagedApp. For apps with multiple images, create separate ManagedApps.
-
-Future options:
-- Add `ImagePaths map[string]string` to VersionPolicy mapping image name → YAML path
-- Support atomic updates of multiple images in a single UpgradeRequest
-
-### GitHub/GitLab Backends
-Current approach: Gitea implementation only.
-
-Future options:
-- Implement `github.Manager` using GitHub API
-- Implement `gitlab.Manager` using GitLab API
-- Consider generic git CLI backend for maximum compatibility
-
-### E2E Test Coverage
-Current approach: unit tests with mocks, scaffolded E2E tests.
-
-Future options:
-- Full E2E tests with Kind cluster, real Gitea instance, mock CSI driver
-- Integration tests with Flux reconciliation
+3. **GIT_TOKEN Secret Format**: Secret key must be uppercase (`TOKEN`) so that `kubectl set env --prefix=GIT_` creates `GIT_TOKEN`.
 
 ---
 
-## Next Steps After Phase 2
+## Future Work
+
+Items identified during Phase 2 that are deferred to future phases:
+
+| Item | Current Approach | Future Options |
+|------|------------------|----------------|
+| **Multi-Image Updates** | One versionPath per ManagedApp | Add `ImagePaths map[string]string` for multiple images |
+| **GitHub/GitLab Backends** | Gitea only | Implement `github.Manager`, `gitlab.Manager`, or generic git CLI |
+| **E2E Test Coverage** | Unit tests with mocks | Full E2E with Kind, real Gitea, mock CSI |
+| **Multi-file Atomic Commits** | Single-file manifests | Use git CLI for atomic multi-file updates |
+| **Smarter Version Path Detection** | Manual `versionPath` config | Parse Renovate output to auto-detect paths |
+| **Richer Dry Run** | Validation only | Create snapshot without commit, full simulation reports |
+
+---
+
+## Next Steps
+
+Phase 2 delivered:
+- UpgradeRequest CRD and controller
+- Git manager with Gitea backend
+- VolumeSnapshot creation with generational retention
+- Flux Kustomization suspend/resume
+- Chart and image version updates via configurable versionPath
+- Health checks and automatic failure recovery
 
 Phase 3 will add:
 - RollbackRequest CRD and controller
 - PVC restore from VolumeSnapshot
 - Git revert functionality
 - Workload scale down/up orchestration
+
+See [Architecture](architecture.md#implementation-phases) for the full roadmap.

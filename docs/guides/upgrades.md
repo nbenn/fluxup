@@ -40,9 +40,9 @@ Apply with:
 kubectl apply -f upgrade.yaml
 ```
 
-### Upgrade to Specific Version
+### Upgrade to Specific Chart Version
 
-To upgrade to a specific version:
+To upgrade a HelmRelease to a specific chart version:
 
 ```yaml
 apiVersion: fluxup.dev/v1alpha1
@@ -55,6 +55,25 @@ spec:
     name: gitea
   targetVersion:
     chart: "11.0.0"
+```
+
+### Upgrade to Specific Image Version
+
+To upgrade an app to a specific image tag (requires `versionPath` in ManagedApp):
+
+```yaml
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: bazarr-upgrade
+  namespace: default
+spec:
+  managedAppRef:
+    name: bazarr
+  targetVersion:
+    images:
+      - name: bazarr
+        tag: "v1.5.0"
 ```
 
 ### Skip Snapshots

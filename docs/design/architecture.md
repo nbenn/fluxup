@@ -763,7 +763,7 @@ rules:
 
 ## Implementation Phases
 
-### Phase 1: Core Infrastructure
+### Phase 1: Core Infrastructure ✅
 - [x] Project scaffolding with kubebuilder
 - [x] ManagedApp CRD and basic controller
 - [x] Renovate CronJob setup with `dryRun=lookup`
@@ -771,12 +771,18 @@ rules:
 - [x] Update ManagedApp status with available updates
 - [x] Structured JSON logging
 
-### Phase 2: Upgrade Workflow
-- [ ] UpgradeRequest CRD and controller
-- [ ] Git manager interface + Gitea implementation
-- [ ] VolumeSnapshot creation before upgrade
-- [ ] Flux Kustomization suspend/resume integration
-- [ ] Health check after upgrade (wait for HelmRelease Ready)
+### Phase 2: Upgrade Workflow ✅
+- [x] UpgradeRequest CRD and controller
+- [x] Git manager interface + Gitea implementation
+- [x] VolumeSnapshot creation before upgrade
+- [x] Snapshot retention policy (generational, maxCount-based)
+- [x] Flux Kustomization suspend/resume integration
+- [x] YAML editor (kyaml-based, preserves comments)
+- [x] Chart version updates (default path for HelmRelease)
+- [x] Image tag updates (custom versionPath)
+- [x] Health check after upgrade (wait for workload Ready)
+- [x] Dry run mode (validation only)
+- [x] Failure recovery (auto-resume Kustomization)
 
 ### Phase 3: Rollback Workflow
 - [ ] RollbackRequest CRD and controller
@@ -802,6 +808,7 @@ rules:
 - [ ] On-demand Renovate scan (trigger update check from UI)
 - [ ] Bulk upgrades (upgrade all with available updates)
 - [ ] Multi-HelmRelease apps (group related releases, e.g., app + database)
+- [ ] Multi-image updates (multiple versionPaths per ManagedApp)
 - [ ] Dependency ordering (upgrade A before B)
 - [ ] Version pinning/skipping in UI
 - [ ] PVC auto-discovery from HelmRelease labels/selectors
