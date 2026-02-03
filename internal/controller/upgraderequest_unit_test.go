@@ -73,6 +73,35 @@ spec:
 	return reconciler, mockGit
 }
 
+// reconcileUntilCondition calls Reconcile repeatedly until the specified condition
+// is set (either True or False based on expectedStatus) or until maxIterations is reached.
+// This simulates the controller's requeue behavior in tests.
+func reconcileUntilCondition(
+	ctx context.Context,
+	r *UpgradeRequestReconciler,
+	req reconcile.Request,
+	conditionType string,
+	maxIterations int,
+) error {
+	for range maxIterations {
+		_, err := r.Reconcile(ctx, req)
+		if err != nil {
+			return err
+		}
+
+		// Check if condition is now set
+		var upgrade fluxupv1alpha1.UpgradeRequest
+		if err := r.Get(ctx, req.NamespacedName, &upgrade); err != nil {
+			return err
+		}
+
+		if meta.FindStatusCondition(upgrade.Status.Conditions, conditionType) != nil {
+			return nil
+		}
+	}
+	return nil // Let the test check if condition was set
+}
+
 func TestUpgradeRequest_ManagedAppNotFound(t *testing.T) {
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
@@ -89,13 +118,15 @@ func TestUpgradeRequest_ManagedAppNotFound(t *testing.T) {
 	r, _ := setupTestReconciler(t, upgrade)
 	ctx := context.Background()
 
-	_, err := r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
-	if err != nil {
+	}
+
+	// Reconcile until Complete condition is set (handles finalizer addition)
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -151,13 +182,15 @@ func TestUpgradeRequest_NoUpdateAvailable(t *testing.T) {
 	r, _ := setupTestReconciler(t, managedApp, upgrade)
 	ctx := context.Background()
 
-	_, err := r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
-	if err != nil {
+	}
+
+	// Reconcile until Complete condition is set (handles finalizer addition)
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -210,13 +243,15 @@ func TestUpgradeRequest_DryRun(t *testing.T) {
 	r, mockGit := setupTestReconciler(t, managedApp, upgrade)
 	ctx := context.Background()
 
-	_, err := r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
-	if err != nil {
+	}
+
+	// Reconcile until Complete condition is set (handles finalizer addition)
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -290,17 +325,16 @@ func TestUpgradeRequest_SuspendKustomization(t *testing.T) {
 	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
 	ctx := context.Background()
 
-	result, err := r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
 	}
-	if !result.Requeue { //nolint:staticcheck // Requeue is the correct field for this reconciler
-		t.Error("expected requeue after suspend")
+
+	// Reconcile until Suspended condition is set (handles finalizer addition)
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeSuspended, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// Check Kustomization is suspended
@@ -372,22 +406,15 @@ func TestUpgradeRequest_CommitToGit(t *testing.T) {
 	r, mockGit := setupTestReconciler(t, kustomization, managedApp, upgrade)
 	ctx := context.Background()
 
-	// First reconcile - suspend
-	_, _ = r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
+	}
 
-	// Second reconcile - commit
-	_, err := r.Reconcile(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      upgrade.Name,
-			Namespace: upgrade.Namespace,
-		},
-	})
-	if err != nil {
+	// Reconcile until GitCommitted condition is set (handles finalizer addition and suspend)
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeGitCommitted, 10); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -495,22 +522,15 @@ spec:
 
 	ctx := context.Background()
 
-	// First reconcile - suspend
-	_, _ = r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
+	}
 
-	// Second reconcile - commit
-	_, err := r.Reconcile(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      upgrade.Name,
-			Namespace: upgrade.Namespace,
-		},
-	})
-	if err != nil {
+	// Reconcile until GitCommitted condition is set
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeGitCommitted, 10); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -591,22 +611,15 @@ func TestUpgradeRequest_ImageUpdateMissingVersionPath(t *testing.T) {
 	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
 	ctx := context.Background()
 
-	// First reconcile - suspend
-	_, _ = r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
+	}
 
-	// Second reconcile - should fail due to missing VersionPath
-	_, err := r.Reconcile(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      upgrade.Name,
-			Namespace: upgrade.Namespace,
-		},
-	})
-	if err != nil {
+	// Reconcile until Complete condition is set (should fail due to missing VersionPath)
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 10); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -668,10 +681,12 @@ func TestUpgradeRequest_HandleReconciling(t *testing.T) {
 	}
 
 	// Create upgrade already at GitCommitted stage (need to enter handleReconciling)
+	// Include finalizer since upgrade is already in progress
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
-			Namespace: "default",
+			Name:       "test-upgrade",
+			Namespace:  "default",
+			Finalizers: []string{OperationFinalizer},
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
 			ManagedAppRef: fluxupv1alpha1.ObjectReference{
@@ -685,6 +700,11 @@ func TestUpgradeRequest_HandleReconciling(t *testing.T) {
 					Type:   fluxupv1alpha1.ConditionTypeSuspended,
 					Status: metav1.ConditionTrue,
 					Reason: "KustomizationSuspended",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
 				},
 				{
 					Type:   fluxupv1alpha1.ConditionTypeSnapshotReady,
@@ -703,14 +723,15 @@ func TestUpgradeRequest_HandleReconciling(t *testing.T) {
 	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
 	ctx := context.Background()
 
-	// Reconcile - should resume Kustomization and check reconciliation
-	_, err := r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
-	if err != nil {
+	}
+
+	// Reconcile until Reconciled condition is set
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeReconciled, 5); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -785,12 +806,13 @@ func TestUpgradeRequest_HandleHealthCheck(t *testing.T) {
 		},
 	}
 
-	// Create upgrade at Reconciled stage
+	// Create upgrade at Reconciled stage with finalizer
 	now := metav1.Now()
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
-			Namespace: "default",
+			Name:       "test-upgrade",
+			Namespace:  "default",
+			Finalizers: []string{OperationFinalizer},
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
 			ManagedAppRef: fluxupv1alpha1.ObjectReference{
@@ -804,6 +826,11 @@ func TestUpgradeRequest_HandleHealthCheck(t *testing.T) {
 					Type:   fluxupv1alpha1.ConditionTypeSuspended,
 					Status: metav1.ConditionTrue, // Suspend phase completed
 					Reason: "KustomizationSuspended",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
 				},
 				{
 					Type:   fluxupv1alpha1.ConditionTypeSnapshotReady,
@@ -832,14 +859,15 @@ func TestUpgradeRequest_HandleHealthCheck(t *testing.T) {
 	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
 	ctx := context.Background()
 
-	// Reconcile - should check health and pass
-	_, err := r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
-	if err != nil {
+	}
+
+	// Reconcile until Healthy condition is set
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeHealthy, 5); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -903,12 +931,13 @@ func TestUpgradeRequest_HandleCompleted(t *testing.T) {
 		},
 	}
 
-	// Create upgrade at Healthy stage (all conditions met except Complete)
+	// Create upgrade at Healthy stage (all conditions met except Complete) with finalizer
 	now := metav1.Now()
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
-			Namespace: "default",
+			Name:       "test-upgrade",
+			Namespace:  "default",
+			Finalizers: []string{OperationFinalizer},
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
 			ManagedAppRef: fluxupv1alpha1.ObjectReference{
@@ -922,6 +951,11 @@ func TestUpgradeRequest_HandleCompleted(t *testing.T) {
 					Type:   fluxupv1alpha1.ConditionTypeSuspended,
 					Status: metav1.ConditionTrue, // Suspend phase completed
 					Reason: "KustomizationSuspended",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
 				},
 				{
 					Type:   fluxupv1alpha1.ConditionTypeSnapshotReady,
@@ -955,14 +989,15 @@ func TestUpgradeRequest_HandleCompleted(t *testing.T) {
 	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
 	ctx := context.Background()
 
-	// Reconcile - should mark as complete and update ManagedApp
-	_, err := r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
-	if err != nil {
+	}
+
+	// Reconcile until Complete condition is set
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -981,6 +1016,11 @@ func TestUpgradeRequest_HandleCompleted(t *testing.T) {
 	}
 	if completeCond.Reason != "UpgradeSucceeded" {
 		t.Errorf("expected reason UpgradeSucceeded, got %s", completeCond.Reason)
+	}
+
+	// Finalizer should be removed
+	if len(result.Finalizers) > 0 {
+		t.Errorf("expected finalizer to be removed, got %v", result.Finalizers)
 	}
 
 	// Check ManagedApp was updated
@@ -1157,11 +1197,12 @@ func TestUpgradeRequest_FailureBeforeGitCommit_ResumesKustomization(t *testing.T
 		},
 	}
 
-	// Upgrade at Suspended stage, ready to commit
+	// Upgrade at Suspended stage, ready to commit (with finalizer)
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
-			Namespace: "default",
+			Name:       "test-upgrade",
+			Namespace:  "default",
+			Finalizers: []string{OperationFinalizer},
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
 			ManagedAppRef: fluxupv1alpha1.ObjectReference{
@@ -1175,6 +1216,11 @@ func TestUpgradeRequest_FailureBeforeGitCommit_ResumesKustomization(t *testing.T
 					Type:   fluxupv1alpha1.ConditionTypeSuspended,
 					Status: metav1.ConditionTrue,
 					Reason: "KustomizationSuspended",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
 				},
 				{
 					Type:   fluxupv1alpha1.ConditionTypeSnapshotReady,
@@ -1192,14 +1238,15 @@ func TestUpgradeRequest_FailureBeforeGitCommit_ResumesKustomization(t *testing.T
 
 	ctx := context.Background()
 
-	// Reconcile - should fail and resume Kustomization
-	_, err := r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
-	if err != nil {
+	}
+
+	// Reconcile until Complete condition is set (should fail)
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1283,22 +1330,15 @@ func TestUpgradeRequest_WithTargetVersion(t *testing.T) {
 	r, mockGit := setupTestReconciler(t, kustomization, managedApp, upgrade)
 	ctx := context.Background()
 
-	// First reconcile - suspend
-	_, _ = r.Reconcile(ctx, reconcile.Request{
+	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      upgrade.Name,
 			Namespace: upgrade.Namespace,
 		},
-	})
+	}
 
-	// Second reconcile - commit
-	_, err := r.Reconcile(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      upgrade.Name,
-			Namespace: upgrade.Namespace,
-		},
-	})
-	if err != nil {
+	// Reconcile until GitCommitted condition is set
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeGitCommitted, 10); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 

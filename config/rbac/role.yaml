@@ -8,8 +8,17 @@ rules:
   - ""
   resources:
   - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumeclaims
   verbs:
+  - create
+  - delete
   - get
   - list
   - watch
@@ -21,11 +30,14 @@ rules:
   verbs:
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - fluxup.dev
   resources:
   - managedapps
+  - rollbackrequests
   - upgraderequests
   verbs:
   - create
@@ -39,6 +51,7 @@ rules:
   - fluxup.dev
   resources:
   - managedapps/finalizers
+  - rollbackrequests/finalizers
   - upgraderequests/finalizers
   verbs:
   - update
@@ -46,6 +59,7 @@ rules:
   - fluxup.dev
   resources:
   - managedapps/status
+  - rollbackrequests/status
   - upgraderequests/status
   verbs:
   - get

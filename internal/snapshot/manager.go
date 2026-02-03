@@ -290,3 +290,162 @@ func sortSnapshotsByCreationTime(snapshots []snapshotv1.VolumeSnapshot) {
 		}
 	}
 }
+
+// RestoreRequest defines a PVC restoration from snapshot
+type RestoreRequest struct {
+	// Name of the snapshot to restore from
+	SnapshotName string
+	// Namespace of the snapshot
+	SnapshotNamespace string
+	// Name for the new PVC
+	NewPVCName string
+	// Namespace for the new PVC
+	NewPVCNamespace string
+	// Storage class name (optional, uses snapshot's SC if empty)
+	StorageClassName string
+	// Labels to apply to the restored PVC
+	Labels map[string]string
+}
+
+// RestorePVCFromSnapshot creates a new PVC from a VolumeSnapshot
+func (m *Manager) RestorePVCFromSnapshot(ctx context.Context, req RestoreRequest) (*corev1.PersistentVolumeClaim, error) {
+	logger := logging.FromContext(ctx)
+	logger.Info("restoring PVC from snapshot",
+		"snapshot", req.SnapshotName,
+		"newPVC", req.NewPVCName,
+		"namespace", req.NewPVCNamespace)
+
+	// Verify snapshot exists and is ready
+	var snapshot snapshotv1.VolumeSnapshot
+	snapshotKey := types.NamespacedName{Name: req.SnapshotName, Namespace: req.SnapshotNamespace}
+	if err := m.client.Get(ctx, snapshotKey, &snapshot); err != nil {
+		return nil, fmt.Errorf("snapshot not found: %w", err)
+	}
+
+	if snapshot.Status == nil || snapshot.Status.ReadyToUse == nil || !*snapshot.Status.ReadyToUse {
+		return nil, fmt.Errorf("snapshot %s is not ready", req.SnapshotName)
+	}
+
+	// Get restore size from snapshot
+	if snapshot.Status.RestoreSize == nil {
+		return nil, fmt.Errorf("snapshot %s has no restore size", req.SnapshotName)
+	}
+	restoreSize := *snapshot.Status.RestoreSize
+
+	// Create PVC with snapshot as data source
+	apiGroup := "snapshot.storage.k8s.io"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      req.NewPVCName,
+			Namespace: req.NewPVCNamespace,
+			Labels:    req.Labels,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: restoreSize,
+				},
+			},
+			DataSource: &corev1.TypedLocalObjectReference{
+				APIGroup: &apiGroup,
+				Kind:     "VolumeSnapshot",
+				Name:     req.SnapshotName,
+			},
+		},
+	}
+
+	if req.StorageClassName != "" {
+		pvc.Spec.StorageClassName = &req.StorageClassName
+	}
+
+	if err := m.client.Create(ctx, pvc); err != nil {
+		return nil, fmt.Errorf("creating PVC from snapshot: %w", err)
+	}
+
+	logger.Info("created PVC from snapshot",
+		"pvc", req.NewPVCName,
+		"snapshot", req.SnapshotName)
+
+	return pvc, nil
+}
+
+// WaitForPVCBound waits for a PVC to be bound
+func (m *Manager) WaitForPVCBound(ctx context.Context, name, namespace string, timeout time.Duration) error {
+	logger := logging.FromContext(ctx)
+	logger.Debug("waiting for PVC to be bound", "pvc", name, "namespace", namespace, "timeout", timeout)
+
+	deadline := time.Now().Add(timeout)
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+
+	for time.Now().Before(deadline) {
+		var pvc corev1.PersistentVolumeClaim
+		if err := m.client.Get(ctx, key, &pvc); err != nil {
+			return fmt.Errorf("getting PVC: %w", err)
+		}
+
+		if pvc.Status.Phase == corev1.ClaimBound {
+			logger.Debug("PVC is bound", "pvc", name)
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			logger.Debug("PVC not bound yet, polling", "pvc", name, "phase", pvc.Status.Phase)
+		}
+	}
+
+	return fmt.Errorf("timeout waiting for PVC %s/%s to be bound", namespace, name)
+}
+
+// DeletePVC deletes a PVC
+func (m *Manager) DeletePVC(ctx context.Context, name, namespace string) error {
+	logger := logging.FromContext(ctx)
+	logger.Debug("deleting PVC", "pvc", name, "namespace", namespace)
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+	if err := m.client.Delete(ctx, pvc); err != nil {
+		return fmt.Errorf("deleting PVC %s/%s: %w", namespace, name, err)
+	}
+
+	logger.Info("deleted PVC", "pvc", name, "namespace", namespace)
+	return nil
+}
+
+// WaitForPVCDeleted waits for a PVC to be completely deleted
+func (m *Manager) WaitForPVCDeleted(ctx context.Context, name, namespace string, timeout time.Duration) error {
+	logger := logging.FromContext(ctx)
+	logger.Debug("waiting for PVC to be deleted", "pvc", name, "namespace", namespace, "timeout", timeout)
+
+	deadline := time.Now().Add(timeout)
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+
+	for time.Now().Before(deadline) {
+		var pvc corev1.PersistentVolumeClaim
+		err := m.client.Get(ctx, key, &pvc)
+		if err != nil {
+			// NotFound means PVC is deleted
+			if client.IgnoreNotFound(err) == nil {
+				logger.Debug("PVC is deleted", "pvc", name)
+				return nil
+			}
+			return fmt.Errorf("getting PVC: %w", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			logger.Debug("PVC still exists, polling", "pvc", name, "phase", pvc.Status.Phase)
+		}
+	}
+
+	return fmt.Errorf("timeout waiting for PVC %s/%s to be deleted", namespace, name)
+}

@@ -138,7 +138,7 @@ FluxUp tracks progress through conditions:
 | Condition | Meaning |
 |-----------|---------|
 | `Suspended` | Flux Kustomization has been paused |
-| `WorkloadScaled` | Workload scaled down (or skipped if no `workloadRef`) |
+| `WorkloadStopped` | Workload stopped (or skipped if no `workloadRef`) |
 | `SnapshotReady` | Pre-upgrade snapshots are ready |
 | `GitCommitted` | Version change committed to Git |
 | `Reconciled` | Flux has applied the changes |

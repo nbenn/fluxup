@@ -1,0 +1,259 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: rollbackrequests.fluxup.dev
+spec:
+  group: fluxup.dev
+  names:
+    kind: RollbackRequest
+    listKind: RollbackRequestList
+    plural: rollbackrequests
+    singular: rollbackrequest
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Complete')].status
+      name: Complete
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Complete')].reason
+      name: Reason
+      type: string
+    - jsonPath: .spec.upgradeRequestRef.name
+      name: UpgradeRequest
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          RollbackRequest is the Schema for the rollbackrequests API.
+          It triggers a rollback of an application to its previous version
+          by restoring PVCs from snapshots and reverting the version in Git.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: RollbackRequestSpec defines the desired state of RollbackRequest
+            properties:
+              autoTriggered:
+                default: false
+                description: Whether this rollback was auto-triggered by a failed
+                  upgrade.
+                type: boolean
+              dryRun:
+                default: false
+                description: Dry run - validate only, don't apply.
+                type: boolean
+              upgradeRequestRef:
+                description: |-
+                  Reference to the UpgradeRequest to rollback.
+                  The controller uses this to find the pre-upgrade snapshot and version.
+                properties:
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - upgradeRequestRef
+            type: object
+          status:
+            description: RollbackRequestStatus defines the observed state of RollbackRequest
+            properties:
+              completedAt:
+                description: When rollback completed
+                format: date-time
+                type: string
+              conditions:
+                description: |-
+                  Conditions represent the current state of the rollback.
+                  The controller determines the current step by checking which conditions are set:
+                  - Suspended=True: Flux suspended
+                  - WorkloadStopped=True: Workload stopped
+                  - VolumesRestored=True: PVCs restored from snapshots
+                  - GitReverted=True: Version reverted in Git
+                  - Suspended=False: Flux resumed
+                  - Healthy=True: Health check passed
+                  - Complete=True: Rollback finished (check reason for success/failure)
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              gitRevert:
+                description: Git revert details
+                properties:
+                  commitSHA:
+                    description: Commit SHA of the revert
+                    type: string
+                  committedAt:
+                    description: When the revert was committed
+                    format: date-time
+                    type: string
+                type: object
+              restoredFrom:
+                description: Information about what was restored
+                properties:
+                  rolledBackVersion:
+                    description: The version being rolled back from (new version that
+                      failed)
+                    properties:
+                      chart:
+                        description: Chart version (for HelmRelease)
+                        type: string
+                      images:
+                        description: Image versions (for raw deployments or helm values)
+                        items:
+                          description: ImageInfo contains image version details
+                          properties:
+                            name:
+                              type: string
+                            tag:
+                              type: string
+                          required:
+                          - name
+                          - tag
+                          type: object
+                        type: array
+                    type: object
+                  targetVersion:
+                    description: The version being rolled back to (previous version)
+                    properties:
+                      chart:
+                        description: Chart version (for HelmRelease)
+                        type: string
+                      images:
+                        description: Image versions (for raw deployments or helm values)
+                        items:
+                          description: ImageInfo contains image version details
+                          properties:
+                            name:
+                              type: string
+                            tag:
+                              type: string
+                          required:
+                          - name
+                          - tag
+                          type: object
+                        type: array
+                    type: object
+                  upgradeRequestName:
+                    description: The UpgradeRequest that was rolled back
+                    type: string
+                type: object
+              startedAt:
+                description: When rollback started
+                format: date-time
+                type: string
+              volumeRestore:
+                description: PVC restoration details
+                properties:
+                  completedAt:
+                    description: When restore completed
+                    format: date-time
+                    type: string
+                  restoredPVCs:
+                    description: PVCs that were restored
+                    items:
+                      description: RestoredPVCInfo records a single PVC restoration
+                      properties:
+                        pvcName:
+                          description: Name of the PVC
+                          type: string
+                        restorationState:
+                          description: 'Restoration state: Pending, Restored, Failed'
+                          type: string
+                        snapshotName:
+                          description: Name of the snapshot it was restored from
+                          type: string
+                      required:
+                      - pvcName
+                      - snapshotName
+                      type: object
+                    type: array
+                  startedAt:
+                    description: When restore started
+                    format: date-time
+                    type: string
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -34,7 +34,7 @@ User creates UpgradeRequest
            │
            ▼
 ┌────────────────────────┐
-│ 3. Scale down          │◀── Condition: WorkloadScaled=True (reason=ScaledDown)
+│ 3. Scale down          │◀── Condition: WorkloadStopped=True
 │    workload to 0       │    Ensures clean shutdown before snapshot
 └──────────┬─────────────┘
            │

@@ -87,7 +87,7 @@ kind: UpgradeRequest
 | Type | Description |
 |------|-------------|
 | `Suspended` | Flux Kustomization has been suspended |
-| `WorkloadScaled` | Workload scaling state (reason: `ScaledDown`, `ScaledUp`, or `ScalingSkipped`) |
+| `WorkloadStopped` | Workload has been stopped (reason: `WorkloadStopped` or `Skipped` if no workloadRef) |
 | `SnapshotReady` | Pre-upgrade snapshots are ready |
 | `GitCommitted` | Version change committed to Git |
 | `Reconciled` | Flux has reconciled the changes |

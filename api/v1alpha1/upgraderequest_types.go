@@ -25,9 +25,9 @@ const (
 	// ConditionTypeSuspended indicates the Flux Kustomization is suspended
 	ConditionTypeSuspended = "Suspended"
 
-	// ConditionTypeWorkloadScaled indicates workload scaling state
-	// Reason: ScaledDown (replicas=0) or ScaledUp (replicas restored)
-	ConditionTypeWorkloadScaled = "WorkloadScaled"
+	// ConditionTypeWorkloadStopped indicates the workload has been stopped (scaled to 0)
+	// True means workload is stopped, False or absent means workload is running
+	ConditionTypeWorkloadStopped = "WorkloadStopped"
 
 	// ConditionTypeSnapshotReady indicates snapshots are ready
 	ConditionTypeSnapshotReady = "SnapshotReady"

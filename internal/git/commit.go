@@ -42,3 +42,16 @@ func FormatCommitMessage(appName, fromVersion, toVersion string, snapshots []str
 
 	return sb.String()
 }
+
+// FormatRevertCommitMessage creates a commit message for rollback operations
+func FormatRevertCommitMessage(appName, fromVersion, toVersion, upgradeRequestName string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("chore(rollback): revert %s to %s\n\n", appName, toVersion))
+	sb.WriteString("Rollback triggered via FluxUp\n")
+	sb.WriteString(fmt.Sprintf("Rolling back from: %s\n", fromVersion))
+	sb.WriteString(fmt.Sprintf("Original upgrade: %s\n", upgradeRequestName))
+	sb.WriteString("\nManaged-By: fluxup\n")
+
+	return sb.String()
+}

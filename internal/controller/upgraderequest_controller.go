@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
 	"github.com/nbenn/fluxup/internal/flux"
@@ -40,6 +41,9 @@ import (
 
 // DefaultFluxNamespace is the default namespace for Flux resources.
 const DefaultFluxNamespace = "flux-system"
+
+// OperationFinalizer is used to prevent deletion of in-progress operations.
+const OperationFinalizer = "fluxup.dev/operation-protection"
 
 // UpgradeRequestReconciler reconciles an UpgradeRequest
 type UpgradeRequestReconciler struct {
@@ -74,7 +78,28 @@ func (r *UpgradeRequestReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	logger.Info("reconciling UpgradeRequest",
 		"managedApp", upgrade.Spec.ManagedAppRef.Name)
 
-	// 2. Check if already complete (terminal state)
+	// 2. Handle deletion - remove finalizer if present
+	if !upgrade.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&upgrade, OperationFinalizer) {
+			controllerutil.RemoveFinalizer(&upgrade, OperationFinalizer)
+			if err := r.Update(ctx, &upgrade); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// 3. Add finalizer if not present (protects in-progress operations from deletion)
+	if !controllerutil.ContainsFinalizer(&upgrade, OperationFinalizer) {
+		controllerutil.AddFinalizer(&upgrade, OperationFinalizer)
+		if err := r.Update(ctx, &upgrade); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Requeue to continue with fresh object
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// 4. Check if already complete (terminal state) - finalizer already removed by completion handler
 	if meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete) {
 		return ctrl.Result{}, nil
 	}
@@ -93,15 +118,14 @@ func (r *UpgradeRequestReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return r.handleSuspend(ctx, &upgrade)
 	}
 
-	// Check if workload needs to be scaled down (before snapshot for consistency)
-	// Only scale if there's a workloadRef configured
-	scaledCond := meta.FindStatusCondition(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeWorkloadScaled)
-	if scaledCond == nil || scaledCond.Reason != "ScaledDown" {
+	// Check if workload needs to be stopped (before snapshot for consistency)
+	// WorkloadStopped=True means either stopped or skipped (no workloadRef)
+	if !meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeWorkloadStopped) {
 		result, err, shouldContinue := r.handleScaleDown(ctx, &upgrade)
 		if !shouldContinue {
 			return result, err
 		}
-		// If shouldContinue is true, no workloadRef configured - skip scaling
+		// If shouldContinue is true, no workloadRef configured - already marked as skipped
 	}
 
 	if !meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeSnapshotReady) {
@@ -286,12 +310,12 @@ func (r *UpgradeRequestReconciler) handleScaleDown(ctx context.Context, upgrade 
 
 	// If no workloadRef configured, skip scaling (return shouldContinue=true)
 	if app.Spec.WorkloadRef == nil {
-		logger.Debug("no workloadRef configured, skipping scale-down")
-		// Mark as scaled (skipped) so we don't check this again
+		logger.Debug("no workloadRef configured, skipping workload stop")
+		// Mark as stopped (skipped) so we don't check this again
 		meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
-			Type:               fluxupv1alpha1.ConditionTypeWorkloadScaled,
+			Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
 			Status:             metav1.ConditionTrue,
-			Reason:             "ScalingSkipped",
+			Reason:             "Skipped",
 			Message:            "No workloadRef configured",
 			ObservedGeneration: upgrade.Generation,
 		})
@@ -340,10 +364,10 @@ func (r *UpgradeRequestReconciler) handleScaleDown(ctx context.Context, upgrade 
 	}
 
 	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
-		Type:               fluxupv1alpha1.ConditionTypeWorkloadScaled,
+		Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
 		Status:             metav1.ConditionTrue,
-		Reason:             "ScaledDown",
-		Message:            fmt.Sprintf("Scaled %s/%s to 0 (was %d)", workloadRef.Kind, workloadRef.Name, scaleInfo.OriginalReplicas),
+		Reason:             "WorkloadStopped",
+		Message:            fmt.Sprintf("Stopped %s/%s (was %d replicas)", workloadRef.Kind, workloadRef.Name, scaleInfo.OriginalReplicas),
 		ObservedGeneration: upgrade.Generation,
 	})
 
@@ -716,6 +740,14 @@ func (r *UpgradeRequestReconciler) handleCompleted(ctx context.Context, upgrade 
 		return ctrl.Result{}, err
 	}
 
+	// Remove finalizer now that operation is complete
+	if controllerutil.ContainsFinalizer(upgrade, OperationFinalizer) {
+		controllerutil.RemoveFinalizer(upgrade, OperationFinalizer)
+		if err := r.Update(ctx, upgrade); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -746,17 +778,29 @@ func (r *UpgradeRequestReconciler) setFailed(ctx context.Context, upgrade *fluxu
 	gitCommitted := meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeGitCommitted)
 
 	if gitCommitted {
-		// After Git commit: rollback required
-		// Do NOT resume - leave state as-is for rollback
-		// Phase 3 will add auto-rollback here
+		// After Git commit: check if auto-rollback is enabled
+		app, err := r.getManagedApp(ctx, upgrade)
+		if err == nil && app.Spec.AutoRollback {
+			// Create RollbackRequest
+			if err := r.createAutoRollback(ctx, upgrade, app); err != nil {
+				logger.Error("failed to create auto-rollback", "error", err)
+				message = fmt.Sprintf("%s - rollback required (auto-rollback failed: %v)", message, err)
+			} else {
+				message = fmt.Sprintf("%s - auto-rollback initiated", message)
+			}
+			logger.Info("upgrade failed after Git commit", "autoRollback", true)
+		} else {
+			message = fmt.Sprintf("%s - rollback required", message)
+			logger.Warn("upgrade failed after Git commit - rollback required")
+		}
+
 		meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
 			Type:               fluxupv1alpha1.ConditionTypeComplete,
 			Status:             metav1.ConditionFalse,
 			Reason:             reason,
-			Message:            fmt.Sprintf("%s - rollback required", message),
+			Message:            message,
 			ObservedGeneration: upgrade.Generation,
 		})
-		logger.Warn("upgrade failed after Git commit - rollback required")
 	} else {
 		// Before Git commit: safe to resume and abort
 		meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
@@ -792,7 +836,50 @@ func (r *UpgradeRequestReconciler) setFailed(ctx context.Context, upgrade *fluxu
 		return ctrl.Result{}, err
 	}
 
+	// Remove finalizer now that operation is complete (failed)
+	if controllerutil.ContainsFinalizer(upgrade, OperationFinalizer) {
+		controllerutil.RemoveFinalizer(upgrade, OperationFinalizer)
+		if err := r.Update(ctx, upgrade); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	return ctrl.Result{}, nil
+}
+
+// createAutoRollback creates a RollbackRequest for the failed upgrade
+func (r *UpgradeRequestReconciler) createAutoRollback(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest, app *fluxupv1alpha1.ManagedApp) error {
+	logger := logging.FromContext(ctx)
+
+	rollbackName := fmt.Sprintf("%s-auto-rollback-%s", app.Name, time.Now().Format("20060102-150405"))
+
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      rollbackName,
+			Namespace: upgrade.Namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: fluxupv1alpha1.GroupVersion.String(),
+					Kind:       "UpgradeRequest",
+					Name:       upgrade.Name,
+					UID:        upgrade.UID,
+				},
+			},
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: upgrade.Name,
+			},
+			AutoTriggered: true,
+		},
+	}
+
+	if err := r.Create(ctx, rollback); err != nil {
+		return fmt.Errorf("creating RollbackRequest: %w", err)
+	}
+
+	logger.Info("created auto-rollback request", "rollback", rollbackName, "upgrade", upgrade.Name)
+	return nil
 }
 
 // applySnapshotRetention prunes old snapshots based on the retention policy
