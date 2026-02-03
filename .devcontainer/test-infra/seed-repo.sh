@@ -48,6 +48,10 @@ GITEA_HOST="${GITEA_HOST#https://}"
 git clone "http://${GITEA_OWNER}:${GITEA_PASSWORD}@${GITEA_HOST}/${GITEA_OWNER}/${GITEA_REPO}.git" repo 2>/dev/null
 cd repo
 
+# Configure git identity for CI environments
+git config user.email "fluxup-test@localhost"
+git config user.name "FluxUp Test"
+
 # Create directory structure
 mkdir -p flux/repositories flux/apps/gitea flux/apps/redis
 
@@ -56,14 +60,10 @@ cp "${SCRIPT_DIR}/manifests/helmrepositories.yaml" flux/repositories/
 cp "${SCRIPT_DIR}/manifests/gitea-helmrelease.yaml" flux/apps/gitea/helmrelease.yaml
 cp "${SCRIPT_DIR}/manifests/redis-helmrelease.yaml" flux/apps/redis/helmrelease.yaml
 
-# Commit and push (skip if nothing changed)
+# Commit and push
 git add .
-if git diff --cached --quiet; then
-    echo "  Repository already seeded, no changes needed"
-else
-    git commit -m "Add test HelmRelease manifests" >/dev/null
-    git push origin main >/dev/null 2>&1
-fi
+git commit -m "Add test HelmRelease manifests" >/dev/null
+git push origin main >/dev/null 2>&1
 
 echo "  Uploaded: flux/repositories/helmrepositories.yaml"
 echo "  Uploaded: flux/apps/gitea/helmrelease.yaml"

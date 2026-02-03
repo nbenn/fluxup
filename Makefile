@@ -85,34 +85,58 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	esac
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
+test-e2e: test-e2e-up manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -coverprofile cover-e2e.out -coverpkg=./...
-	$(MAKE) cleanup-test-e2e
-
-.PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+	$(MAKE) test-e2e-down
 
 .PHONY: test-integration
-test-integration: test-infra-up test-infra-seed ## Run integration tests with coverage
+test-integration: test-integration-up ## Run integration tests with coverage
 	@bash -c 'set -a && source .devcontainer/test-infra/.env && set +a && go test -tags=integration -v ./internal/git/... -coverprofile cover-integration.out -coverpkg=./...'
+	$(MAKE) test-integration-down
 
 ##@ Test Infrastructure
 
-.PHONY: test-infra-up
-test-infra-up: ## Start Gitea test instance for integration tests
+# Integration test infrastructure (Gitea)
+.PHONY: test-integration-up
+test-integration-up: ## Start Gitea and seed test repository for integration tests
 	@.devcontainer/test-infra/start.sh
-
-.PHONY: test-infra-down
-test-infra-down: ## Stop Gitea test instance
-	@.devcontainer/test-infra/stop.sh
-
-.PHONY: test-infra-seed
-test-infra-seed: test-infra-up ## Seed test repository with manifests
 	@.devcontainer/test-infra/seed-repo.sh
 
+.PHONY: test-integration-down
+test-integration-down: ## Stop Gitea test instance
+	@.devcontainer/test-infra/stop.sh
+
+# E2E test infrastructure (Kind cluster)
+.PHONY: test-e2e-up
+test-e2e-up: ## Create Kind cluster for e2e tests if it does not exist
+	@command -v $(KIND) >/dev/null 2>&1 || { \
+		echo "Kind is not installed. Please install Kind manually."; \
+		exit 1; \
+	}
+	@case "$$($(KIND) get clusters)" in \
+		*"$(KIND_CLUSTER)"*) \
+			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
+		*) \
+			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
+			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
+	esac
+
+.PHONY: test-e2e-down
+test-e2e-down: ## Tear down the Kind cluster used for e2e tests
+	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+# Legacy aliases for backward compatibility
+.PHONY: test-infra-up
+test-infra-up: test-integration-up ## Alias for test-integration-up (deprecated)
+
+.PHONY: test-infra-down
+test-infra-down: test-integration-down ## Alias for test-integration-down (deprecated)
+
+.PHONY: test-infra-seed
+test-infra-seed: test-integration-up ## Alias for test-integration-up (deprecated)
+
 .PHONY: test-fixtures
-test-fixtures: test-infra-seed ## Run Renovate and capture output as test fixtures
+test-fixtures: test-integration-up ## Run Renovate and capture output as test fixtures
 	@. .devcontainer/test-infra/.env && .devcontainer/test-infra/run-renovate.sh
 
 .PHONY: coverage-merge

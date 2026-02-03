@@ -111,21 +111,19 @@ make test-integration
 # E2E tests (creates Kind cluster, deploys controller)
 make test-e2e
 
-# Stop test infrastructure when done
-make test-infra-down
 ```
 
 ### Test Infrastructure
 
-The project uses containerized test infrastructure:
+The project uses containerized test infrastructure with a consistent `up`/`down` pattern:
 
-| Component | Purpose | Started By |
-|-----------|---------|------------|
-| **Gitea** | Git server for integration tests | `make test-infra-up` |
-| **Renovate** | Version detection (runs on-demand) | `make test-fixtures` |
-| **Kind** | Kubernetes cluster for e2e tests | `make test-e2e` |
+| Component | Purpose | Start | Stop |
+|-----------|---------|-------|------|
+| **Gitea** | Git server for integration tests | `make test-integration-up` | `make test-integration-down` |
+| **Kind** | Kubernetes cluster for e2e tests | `make test-e2e-up` | `make test-e2e-down` |
+| **Renovate** | Version detection (runs on-demand) | `make test-fixtures` | N/A |
 
-Integration tests (`make test-integration`) automatically start Gitea if needed. E2E tests (`make test-e2e`) automatically create a Kind cluster and install CertManager.
+Both `make test-integration` and `make test-e2e` automatically start and stop their infrastructure.
 
 ### Regenerating Renovate Fixtures
 
