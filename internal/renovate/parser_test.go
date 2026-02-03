@@ -17,6 +17,7 @@ limitations under the License.
 package renovate
 
 import (
+	"context"
 	"testing"
 )
 
@@ -142,7 +143,7 @@ func TestExtractUpdates(t *testing.T) {
 			p := &Parser{}
 			var updates []UpdateInfo
 			if tt.config != nil {
-				updates = p.extractUpdates(tt.config)
+				updates = p.extractUpdates(context.Background(), tt.config)
 			}
 			if len(updates) != tt.expected {
 				t.Errorf("extractUpdates() got %d updates, want %d", len(updates), tt.expected)
@@ -171,7 +172,7 @@ func TestUpdateInfoFields(t *testing.T) {
 	}
 
 	p := &Parser{}
-	updates := p.extractUpdates(config)
+	updates := p.extractUpdates(context.Background(), config)
 
 	if len(updates) != 1 {
 		t.Fatalf("expected 1 update, got %d", len(updates))

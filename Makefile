@@ -105,7 +105,7 @@ docker-build-cover: ## Build docker image with coverage instrumentation for e2e 
 	$(CONTAINER_TOOL) build -t ${IMG_COVER} -f Dockerfile.cover .
 
 .PHONY: test-e2e-cover
-test-e2e-cover: test-e2e-up manifests generate fmt vet docker-build-cover ## Run e2e tests with coverage collection.
+test-e2e-cover: test-e2e-up manifests generate fmt vet kustomize docker-build-cover ## Run e2e tests with coverage collection.
 	@mkdir -p "$(COVERAGE_E2E)"
 	@# Load coverage image into Kind
 	$(KIND) load docker-image ${IMG_COVER} --name $(KIND_CLUSTER)

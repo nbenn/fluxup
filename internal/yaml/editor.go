@@ -18,6 +18,7 @@ package yaml
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"sigs.k8s.io/kustomize/kyaml/yaml"
@@ -27,15 +28,28 @@ import (
 const DefaultHelmReleaseVersionPath = "spec.chart.spec.version"
 
 // Editor modifies YAML content while preserving structure and comments
-type Editor struct{}
+type Editor struct {
+	logger *slog.Logger
+}
 
 // NewEditor creates a new YAML editor
 func NewEditor() *Editor {
-	return &Editor{}
+	return &Editor{
+		logger: slog.Default(),
+	}
+}
+
+// NewEditorWithLogger creates a new YAML editor with a custom logger
+func NewEditorWithLogger(logger *slog.Logger) *Editor {
+	return &Editor{
+		logger: logger,
+	}
 }
 
 // UpdateVersion updates the version at the given path in YAML content
 func (e *Editor) UpdateVersion(content []byte, versionPath, newVersion string) ([]byte, error) {
+	e.logger.Debug("updating version in YAML", "path", versionPath, "newVersion", newVersion)
+
 	obj, err := yaml.Parse(string(content))
 	if err != nil {
 		return nil, fmt.Errorf("parsing YAML: %w", err)
@@ -57,6 +71,7 @@ func (e *Editor) UpdateVersion(content []byte, versionPath, newVersion string) (
 		return nil, fmt.Errorf("serializing YAML: %w", err)
 	}
 
+	e.logger.Debug("successfully updated version in YAML", "path", versionPath, "newVersion", newVersion)
 	return []byte(result), nil
 }
 
@@ -68,6 +83,8 @@ func (e *Editor) UpdateHelmReleaseVersion(content []byte, newVersion string) ([]
 
 // GetVersion reads the version at the given path in YAML content
 func (e *Editor) GetVersion(content []byte, versionPath string) (string, error) {
+	e.logger.Debug("reading version from YAML", "path", versionPath)
+
 	obj, err := yaml.Parse(string(content))
 	if err != nil {
 		return "", fmt.Errorf("parsing YAML: %w", err)
@@ -90,6 +107,7 @@ func (e *Editor) GetVersion(content []byte, versionPath string) (string, error) 
 		return "", fmt.Errorf("empty version at path: %s", versionPath)
 	}
 
+	e.logger.Debug("found version in YAML", "path", versionPath, "version", value)
 	return value, nil
 }
 

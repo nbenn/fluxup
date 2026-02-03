@@ -24,6 +24,8 @@ import (
 	"strings"
 
 	"code.gitea.io/sdk/gitea"
+
+	"github.com/nbenn/fluxup/internal/logging"
 )
 
 // GiteaManager implements Manager for Gitea
@@ -74,9 +76,13 @@ func NewGiteaManager(cfg Config) (*GiteaManager, error) {
 
 // ReadFile reads a file from the repository
 func (g *GiteaManager) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	logger := logging.FromContext(ctx)
+	logger.Debug("reading file from git", "owner", g.owner, "repo", g.repo, "branch", g.branch, "path", path)
+
 	content, resp, err := g.client.GetContents(g.owner, g.repo, g.branch, path)
 	if err != nil {
 		if resp != nil && resp.StatusCode == 404 {
+			logger.Debug("file not found in git", "path", path)
 			return nil, fmt.Errorf("file not found: %s", path)
 		}
 		return nil, fmt.Errorf("reading file: %w", err)
@@ -92,11 +98,15 @@ func (g *GiteaManager) ReadFile(ctx context.Context, path string) ([]byte, error
 		return nil, fmt.Errorf("decoding content: %w", err)
 	}
 
+	logger.Debug("successfully read file from git", "path", path, "size", len(decoded))
 	return decoded, nil
 }
 
 // CommitFile commits a single file change
 func (g *GiteaManager) CommitFile(ctx context.Context, change FileChange, message string) (*CommitInfo, error) {
+	logger := logging.FromContext(ctx)
+	logger.Debug("committing file to git", "path", change.Path, "branch", g.branch)
+
 	// Get current file SHA for update (required by Gitea API for updates)
 	existing, _, _ := g.client.GetContents(g.owner, g.repo, g.branch, change.Path)
 
@@ -104,6 +114,7 @@ func (g *GiteaManager) CommitFile(ctx context.Context, change FileChange, messag
 
 	// Use CreateFile for new files, UpdateFile for existing ones
 	if existing == nil || existing.SHA == "" {
+		logger.Debug("creating new file in git", "path", change.Path)
 		opts := gitea.CreateFileOptions{
 			FileOptions: gitea.FileOptions{
 				Message:    message,
@@ -115,6 +126,7 @@ func (g *GiteaManager) CommitFile(ctx context.Context, change FileChange, messag
 		if err != nil {
 			return nil, fmt.Errorf("creating file: %w", err)
 		}
+		logger.Info("created file in git", "path", change.Path, "commit", resp.Commit.SHA)
 		return &CommitInfo{
 			SHA:     resp.Commit.SHA,
 			Message: message,
@@ -123,6 +135,7 @@ func (g *GiteaManager) CommitFile(ctx context.Context, change FileChange, messag
 	}
 
 	// Update existing file
+	logger.Debug("updating existing file in git", "path", change.Path, "existingSHA", existing.SHA)
 	opts := gitea.UpdateFileOptions{
 		FileOptions: gitea.FileOptions{
 			Message:    message,
@@ -136,6 +149,7 @@ func (g *GiteaManager) CommitFile(ctx context.Context, change FileChange, messag
 		return nil, fmt.Errorf("updating file: %w", err)
 	}
 
+	logger.Info("updated file in git", "path", change.Path, "commit", resp.Commit.SHA)
 	return &CommitInfo{
 		SHA:     resp.Commit.SHA,
 		Message: message,
@@ -147,6 +161,9 @@ func (g *GiteaManager) CommitFile(ctx context.Context, change FileChange, messag
 // Note: Gitea API doesn't support atomic multi-file commits,
 // so files are committed sequentially
 func (g *GiteaManager) CommitFiles(ctx context.Context, changes []FileChange, message string) (*CommitInfo, error) {
+	logger := logging.FromContext(ctx)
+	logger.Debug("committing multiple files to git", "count", len(changes))
+
 	var lastCommit *CommitInfo
 	for _, change := range changes {
 		commit, err := g.CommitFile(ctx, change, message)
@@ -155,11 +172,16 @@ func (g *GiteaManager) CommitFiles(ctx context.Context, changes []FileChange, me
 		}
 		lastCommit = commit
 	}
+
+	logger.Info("committed multiple files to git", "count", len(changes), "lastCommit", lastCommit.SHA)
 	return lastCommit, nil
 }
 
 // GetLatestCommit returns the latest commit on the branch
 func (g *GiteaManager) GetLatestCommit(ctx context.Context) (*CommitInfo, error) {
+	logger := logging.FromContext(ctx)
+	logger.Debug("getting latest commit", "branch", g.branch)
+
 	commits, _, err := g.client.ListRepoCommits(g.owner, g.repo, gitea.ListCommitOptions{
 		SHA: g.branch,
 		ListOptions: gitea.ListOptions{
@@ -179,6 +201,7 @@ func (g *GiteaManager) GetLatestCommit(ctx context.Context) (*CommitInfo, error)
 		author = commits[0].Author.UserName
 	}
 
+	logger.Debug("found latest commit", "sha", commits[0].SHA, "author", author)
 	return &CommitInfo{
 		SHA:     commits[0].SHA,
 		Message: commits[0].RepoCommit.Message,

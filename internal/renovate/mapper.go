@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
+	"github.com/nbenn/fluxup/internal/logging"
 )
 
 // Mapper maps Renovate updates to ManagedApp resources
@@ -43,11 +44,16 @@ type MappedUpdate struct {
 
 // MapUpdatesToManagedApps matches Renovate updates to ManagedApp resources
 func (m *Mapper) MapUpdatesToManagedApps(ctx context.Context, updates []UpdateInfo) (map[types.NamespacedName]*fluxupv1alpha1.VersionInfo, error) {
+	logger := logging.FromContext(ctx)
+	logger.Debug("mapping updates to ManagedApps", "updateCount", len(updates))
+
 	// Fetch all ManagedApps
 	var apps fluxupv1alpha1.ManagedAppList
 	if err := m.client.List(ctx, &apps); err != nil {
 		return nil, err
 	}
+
+	logger.Debug("found ManagedApps for mapping", "count", len(apps.Items))
 
 	// Build lookup map: gitPath -> ManagedApp key
 	pathToApp := make(map[string]types.NamespacedName)
@@ -65,6 +71,7 @@ func (m *Mapper) MapUpdatesToManagedApps(ctx context.Context, updates []UpdateIn
 	for _, update := range updates {
 		appKey, ok := pathToApp[update.PackageFile]
 		if !ok {
+			logger.Debug("no ManagedApp found for update", "packageFile", update.PackageFile)
 			continue // No ManagedApp for this file
 		}
 
@@ -74,8 +81,10 @@ func (m *Mapper) MapUpdatesToManagedApps(ctx context.Context, updates []UpdateIn
 
 		switch update.Datasource {
 		case DatasourceHelm:
+			logger.Debug("mapped helm update to ManagedApp", "app", appKey, "newVersion", update.NewVersion)
 			result[appKey].Chart = update.NewVersion
 		case DatasourceDocker:
+			logger.Debug("mapped docker update to ManagedApp", "app", appKey, "image", update.DependencyName, "tag", update.NewVersion)
 			result[appKey].Images = append(result[appKey].Images, fluxupv1alpha1.ImageInfo{
 				Name: update.DependencyName,
 				Tag:  update.NewVersion,
@@ -83,5 +92,6 @@ func (m *Mapper) MapUpdatesToManagedApps(ctx context.Context, updates []UpdateIn
 		}
 	}
 
+	logger.Debug("completed mapping updates", "mappedApps", len(result))
 	return result, nil
 }

@@ -24,6 +24,8 @@ import (
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/nbenn/fluxup/internal/logging"
 )
 
 // Helper provides Flux-related operations
@@ -38,6 +40,9 @@ func NewHelper(c client.Client) *Helper {
 
 // SuspendKustomization suspends a Flux Kustomization
 func (h *Helper) SuspendKustomization(ctx context.Context, name, namespace string) error {
+	logger := logging.FromContext(ctx)
+	logger.Debug("suspending Kustomization", "name", name, "namespace", namespace)
+
 	var ks kustomizev1.Kustomization
 	key := types.NamespacedName{Name: name, Namespace: namespace}
 
@@ -46,6 +51,7 @@ func (h *Helper) SuspendKustomization(ctx context.Context, name, namespace strin
 	}
 
 	if ks.Spec.Suspend {
+		logger.Debug("Kustomization already suspended", "name", name)
 		return nil // Already suspended
 	}
 
@@ -56,11 +62,15 @@ func (h *Helper) SuspendKustomization(ctx context.Context, name, namespace strin
 		return fmt.Errorf("suspending kustomization: %w", err)
 	}
 
+	logger.Info("suspended Kustomization", "name", name, "namespace", namespace)
 	return nil
 }
 
 // ResumeKustomization resumes a Flux Kustomization
 func (h *Helper) ResumeKustomization(ctx context.Context, name, namespace string) error {
+	logger := logging.FromContext(ctx)
+	logger.Debug("resuming Kustomization", "name", name, "namespace", namespace)
+
 	var ks kustomizev1.Kustomization
 	key := types.NamespacedName{Name: name, Namespace: namespace}
 
@@ -69,6 +79,7 @@ func (h *Helper) ResumeKustomization(ctx context.Context, name, namespace string
 	}
 
 	if !ks.Spec.Suspend {
+		logger.Debug("Kustomization already resumed", "name", name)
 		return nil // Already resumed
 	}
 
@@ -79,6 +90,7 @@ func (h *Helper) ResumeKustomization(ctx context.Context, name, namespace string
 		return fmt.Errorf("resuming kustomization: %w", err)
 	}
 
+	logger.Info("resumed Kustomization", "name", name, "namespace", namespace)
 	return nil
 }
 
@@ -96,6 +108,9 @@ func (h *Helper) IsSuspended(ctx context.Context, name, namespace string) (bool,
 
 // WaitForReconciliation waits for Kustomization to reconcile after resuming
 func (h *Helper) WaitForReconciliation(ctx context.Context, name, namespace string, timeout time.Duration) error {
+	logger := logging.FromContext(ctx)
+	logger.Debug("waiting for Kustomization reconciliation", "name", name, "namespace", namespace, "timeout", timeout)
+
 	deadline := time.Now().Add(timeout)
 	key := types.NamespacedName{Name: name, Namespace: namespace}
 
@@ -118,6 +133,7 @@ func (h *Helper) WaitForReconciliation(ctx context.Context, name, namespace stri
 			for _, cond := range ks.Status.Conditions {
 				if cond.Type == "Ready" {
 					if cond.Status == "True" {
+						logger.Debug("Kustomization reconciliation succeeded", "name", name)
 						return nil // Reconciliation succeeded
 					}
 					if cond.Status == "False" {
@@ -131,7 +147,7 @@ func (h *Helper) WaitForReconciliation(ctx context.Context, name, namespace stri
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(5 * time.Second):
-			// Continue polling
+			logger.Debug("waiting for Kustomization reconciliation", "name", name, "observedGen", ks.Status.ObservedGeneration)
 		}
 	}
 

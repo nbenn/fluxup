@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
+	"github.com/nbenn/fluxup/internal/logging"
 )
 
 // Manager handles VolumeSnapshot lifecycle
@@ -58,6 +59,9 @@ type SnapshotInfo struct {
 
 // CreateSnapshot creates a VolumeSnapshot for a PVC
 func (m *Manager) CreateSnapshot(ctx context.Context, req SnapshotRequest) (*snapshotv1.VolumeSnapshot, error) {
+	logger := logging.FromContext(ctx)
+	logger.Debug("creating volume snapshot", "pvc", req.PVCName, "namespace", req.PVCNamespace, "snapshotName", req.SnapshotName)
+
 	// Verify PVC exists
 	var pvc corev1.PersistentVolumeClaim
 	pvcKey := types.NamespacedName{Name: req.PVCName, Namespace: req.PVCNamespace}
@@ -86,11 +90,15 @@ func (m *Manager) CreateSnapshot(ctx context.Context, req SnapshotRequest) (*sna
 		return nil, fmt.Errorf("creating snapshot: %w", err)
 	}
 
+	logger.Info("created volume snapshot", "snapshot", req.SnapshotName, "pvc", req.PVCName)
 	return snapshot, nil
 }
 
 // WaitForSnapshotReady waits for a snapshot to be ready using simple polling
 func (m *Manager) WaitForSnapshotReady(ctx context.Context, name, namespace string, timeout time.Duration) error {
+	logger := logging.FromContext(ctx)
+	logger.Debug("waiting for snapshot to be ready", "snapshot", name, "namespace", namespace, "timeout", timeout)
+
 	deadline := time.Now().Add(timeout)
 	key := types.NamespacedName{Name: name, Namespace: namespace}
 
@@ -101,6 +109,7 @@ func (m *Manager) WaitForSnapshotReady(ctx context.Context, name, namespace stri
 		}
 
 		if snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse {
+			logger.Debug("snapshot is ready", "snapshot", name)
 			return nil
 		}
 
@@ -113,7 +122,7 @@ func (m *Manager) WaitForSnapshotReady(ctx context.Context, name, namespace stri
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(5 * time.Second):
-			// Continue polling
+			logger.Debug("snapshot not ready yet, polling", "snapshot", name)
 		}
 	}
 
@@ -142,6 +151,9 @@ func (m *Manager) CreateSnapshotsForUpgrade(
 	pvcs []fluxupv1alpha1.PVCRef,
 	snapshotClass string,
 ) ([]SnapshotInfo, error) {
+	logger := logging.FromContext(ctx)
+	logger.Info("creating pre-upgrade snapshots", "app", appName, "pvcCount", len(pvcs))
+
 	timestamp := time.Now().Format("20060102-150405")
 	snapshots := make([]SnapshotInfo, 0, len(pvcs))
 
@@ -176,18 +188,27 @@ func (m *Manager) CreateSnapshotsForUpgrade(
 		})
 	}
 
+	logger.Info("created all pre-upgrade snapshots", "app", appName, "count", len(snapshots))
 	return snapshots, nil
 }
 
 // DeleteSnapshot deletes a VolumeSnapshot
 func (m *Manager) DeleteSnapshot(ctx context.Context, name, namespace string) error {
+	logger := logging.FromContext(ctx)
+	logger.Debug("deleting volume snapshot", "snapshot", name, "namespace", namespace)
+
 	snapshot := &snapshotv1.VolumeSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
 	}
-	return m.client.Delete(ctx, snapshot)
+	if err := m.client.Delete(ctx, snapshot); err != nil {
+		return err
+	}
+
+	logger.Info("deleted volume snapshot", "snapshot", name, "namespace", namespace)
+	return nil
 }
 
 // DefaultMaxSnapshotCount is the default number of snapshots to retain per PVC
@@ -197,10 +218,14 @@ const DefaultMaxSnapshotCount = 3
 // It keeps only the newest maxCount snapshots per PVC, deleting older ones.
 // If maxCount is 0, no snapshots are deleted (retention disabled).
 func (m *Manager) ApplyRetentionPolicy(ctx context.Context, appName, namespace string, maxCount int) (int, error) {
+	logger := logging.FromContext(ctx)
+
 	if maxCount == 0 {
-		// Retention disabled - keep all snapshots
+		logger.Debug("retention policy disabled, keeping all snapshots", "app", appName)
 		return 0, nil
 	}
+
+	logger.Debug("applying snapshot retention policy", "app", appName, "maxCount", maxCount)
 
 	// List all snapshots for this app
 	var snapshots snapshotv1.VolumeSnapshotList
@@ -212,8 +237,11 @@ func (m *Manager) ApplyRetentionPolicy(ctx context.Context, appName, namespace s
 	}
 
 	if len(snapshots.Items) == 0 {
+		logger.Debug("no snapshots found for app", "app", appName)
 		return 0, nil
 	}
+
+	logger.Debug("found snapshots for retention check", "app", appName, "total", len(snapshots.Items))
 
 	// Group snapshots by PVC name
 	byPVC := make(map[string][]snapshotv1.VolumeSnapshot)
@@ -227,7 +255,7 @@ func (m *Manager) ApplyRetentionPolicy(ctx context.Context, appName, namespace s
 
 	// For each PVC, sort by creation time and delete oldest beyond maxCount
 	deleted := 0
-	for _, pvcSnapshots := range byPVC {
+	for pvcName, pvcSnapshots := range byPVC {
 		if len(pvcSnapshots) <= maxCount {
 			continue
 		}
@@ -238,13 +266,17 @@ func (m *Manager) ApplyRetentionPolicy(ctx context.Context, appName, namespace s
 		// Delete snapshots beyond maxCount
 		for _, snap := range pvcSnapshots[maxCount:] {
 			if err := m.client.Delete(ctx, &snap); err != nil {
-				// Log but continue - best effort cleanup
+				logger.Warn("failed to delete old snapshot", "snapshot", snap.Name, "error", err)
 				continue
 			}
+			logger.Debug("deleted old snapshot", "snapshot", snap.Name, "pvc", pvcName)
 			deleted++
 		}
 	}
 
+	if deleted > 0 {
+		logger.Info("pruned old snapshots", "app", appName, "deleted", deleted)
+	}
 	return deleted, nil
 }
 

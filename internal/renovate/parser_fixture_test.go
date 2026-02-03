@@ -17,6 +17,7 @@ limitations under the License.
 package renovate
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -28,7 +29,7 @@ func TestParseFixture_HelmUpdate(t *testing.T) {
 	entry := loadFixture(t, "helm_update.json")
 
 	p := &Parser{}
-	updates := p.extractUpdates(entry.Config)
+	updates := p.extractUpdates(context.Background(), entry.Config)
 
 	if len(updates) != 1 {
 		t.Fatalf("expected 1 update, got %d", len(updates))
@@ -50,7 +51,7 @@ func TestParseFixture_ImageUpdate(t *testing.T) {
 	entry := loadFixture(t, "image_update.json")
 
 	p := &Parser{}
-	updates := p.extractUpdates(entry.Config)
+	updates := p.extractUpdates(context.Background(), entry.Config)
 
 	if len(updates) != 1 {
 		t.Fatalf("expected 1 update, got %d", len(updates))
@@ -75,7 +76,7 @@ func TestParseFixture_MixedUpdates(t *testing.T) {
 	entry := loadFixture(t, "mixed_updates.json")
 
 	p := &Parser{}
-	updates := p.extractUpdates(entry.Config)
+	updates := p.extractUpdates(context.Background(), entry.Config)
 
 	// Real Renovate output has:
 	// - flux manager: gitea (helm), gitea/gitea (docker), redis (helm)
@@ -144,7 +145,7 @@ func TestParseFixture_NoUpdates(t *testing.T) {
 	entry := loadFixture(t, "no_updates.json")
 
 	p := &Parser{}
-	updates := p.extractUpdates(entry.Config)
+	updates := p.extractUpdates(context.Background(), entry.Config)
 
 	if len(updates) != 0 {
 		t.Fatalf("expected 0 updates, got %d", len(updates))

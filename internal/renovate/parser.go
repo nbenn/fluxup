@@ -24,6 +24,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/nbenn/fluxup/internal/logging"
 )
 
 // Parser reads and parses Renovate output from a ConfigMap
@@ -44,6 +46,9 @@ func NewParser(c client.Client, namespace, configMapName string) *Parser {
 
 // Parse reads the ConfigMap and extracts update info
 func (p *Parser) Parse(ctx context.Context) ([]UpdateInfo, error) {
+	logger := logging.FromContext(ctx)
+	logger.Debug("parsing Renovate updates from ConfigMap", "configMap", p.configMap, "namespace", p.namespace)
+
 	var cm corev1.ConfigMap
 	key := types.NamespacedName{Name: p.configMap, Namespace: p.namespace}
 	if err := p.client.Get(ctx, key, &cm); err != nil {
@@ -52,8 +57,11 @@ func (p *Parser) Parse(ctx context.Context) ([]UpdateInfo, error) {
 
 	data, ok := cm.Data["updates.json"]
 	if !ok || data == "" {
+		logger.Debug("no updates.json data in ConfigMap")
 		return nil, nil // No updates
 	}
+
+	logger.Debug("parsing updates.json", "dataSize", len(data))
 
 	var entry RenovateLogEntry
 	if err := json.Unmarshal([]byte(data), &entry); err != nil {
@@ -61,19 +69,25 @@ func (p *Parser) Parse(ctx context.Context) ([]UpdateInfo, error) {
 	}
 
 	if entry.Config == nil {
+		logger.Debug("no config in Renovate log entry")
 		return nil, nil
 	}
 
-	return p.extractUpdates(entry.Config), nil
+	updates := p.extractUpdates(ctx, entry.Config)
+	logger.Debug("extracted updates from Renovate output", "count", len(updates))
+	return updates, nil
 }
 
-func (p *Parser) extractUpdates(config *RenovateConfig) []UpdateInfo {
+func (p *Parser) extractUpdates(ctx context.Context, config *RenovateConfig) []UpdateInfo {
+	logger := logging.FromContext(ctx)
 	var updates []UpdateInfo
 
 	// Process Flux manager updates (HelmRelease chart versions)
 	for _, pf := range config.Flux {
 		for _, dep := range pf.Deps {
 			if len(dep.Updates) > 0 {
+				logger.Debug("found flux update", "file", pf.PackageFile, "dep", dep.DepName,
+					"current", dep.CurrentValue, "new", dep.Updates[0].NewValue)
 				updates = append(updates, UpdateInfo{
 					PackageFile:    pf.PackageFile,
 					DependencyName: dep.DepName,
@@ -90,6 +104,8 @@ func (p *Parser) extractUpdates(config *RenovateConfig) []UpdateInfo {
 	for _, pf := range config.HelmValues {
 		for _, dep := range pf.Deps {
 			if len(dep.Updates) > 0 {
+				logger.Debug("found helm-values update", "file", pf.PackageFile, "dep", dep.DepName,
+					"current", dep.CurrentValue, "new", dep.Updates[0].NewValue)
 				updates = append(updates, UpdateInfo{
 					PackageFile:    pf.PackageFile,
 					DependencyName: dep.DepName,
@@ -106,6 +122,8 @@ func (p *Parser) extractUpdates(config *RenovateConfig) []UpdateInfo {
 	for _, pf := range config.Regex {
 		for _, dep := range pf.Deps {
 			if len(dep.Updates) > 0 {
+				logger.Debug("found regex update", "file", pf.PackageFile, "dep", dep.DepName,
+					"current", dep.CurrentValue, "new", dep.Updates[0].NewValue)
 				updates = append(updates, UpdateInfo{
 					PackageFile:    pf.PackageFile,
 					DependencyName: dep.DepName,
