@@ -41,7 +41,7 @@ func TestParseFixture_HelmUpdate(t *testing.T) {
 		CurrentVersion: "10.0.0",
 		NewVersion:     "10.4.1",
 		UpdateType:     "minor",
-		Datasource:     "helm",
+		Datasource:     DatasourceHelm,
 	})
 }
 
@@ -63,7 +63,7 @@ func TestParseFixture_ImageUpdate(t *testing.T) {
 		CurrentVersion: "7.2.0",
 		NewVersion:     "7.2.4",
 		UpdateType:     "patch",
-		Datasource:     "docker",
+		Datasource:     DatasourceDocker,
 	})
 }
 
@@ -89,9 +89,9 @@ func TestParseFixture_MixedUpdates(t *testing.T) {
 	var helmCount, dockerCount int
 	for _, u := range updates {
 		switch u.Datasource {
-		case "helm":
+		case DatasourceHelm:
 			helmCount++
-		case "docker":
+		case DatasourceDocker:
 			dockerCount++
 		}
 	}
@@ -112,17 +112,17 @@ func TestParseFixture_MixedUpdates(t *testing.T) {
 		switch u.DependencyName {
 		case "gitea":
 			foundGiteaHelm = true
-			if u.Datasource != "helm" {
+			if u.Datasource != DatasourceHelm {
 				t.Errorf("gitea: expected datasource helm, got %s", u.Datasource)
 			}
 		case "gitea/gitea":
 			foundGiteaImage = true
-			if u.Datasource != "docker" {
+			if u.Datasource != DatasourceDocker {
 				t.Errorf("gitea/gitea: expected datasource docker, got %s", u.Datasource)
 			}
 		case "redis":
 			foundRedisHelm = true
-			if u.Datasource != "helm" {
+			if u.Datasource != DatasourceHelm {
 				t.Errorf("redis: expected datasource helm, got %s", u.Datasource)
 			}
 		}

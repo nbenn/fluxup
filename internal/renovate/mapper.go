@@ -73,9 +73,9 @@ func (m *Mapper) MapUpdatesToManagedApps(ctx context.Context, updates []UpdateIn
 		}
 
 		switch update.Datasource {
-		case "helm":
+		case DatasourceHelm:
 			result[appKey].Chart = update.NewVersion
-		case "docker":
+		case DatasourceDocker:
 			result[appKey].Images = append(result[appKey].Images, fluxupv1alpha1.ImageInfo{
 				Name: update.DependencyName,
 				Tag:  update.NewVersion,

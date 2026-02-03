@@ -46,7 +46,7 @@ func TestExtractUpdates(t *testing.T) {
 							{
 								DepName:      "gitea",
 								CurrentValue: "10.0.0",
-								Datasource:   "helm",
+								Datasource:   DatasourceHelm,
 								Updates: []Update{
 									{NewValue: "10.1.0", UpdateType: "minor"},
 								},
@@ -67,7 +67,7 @@ func TestExtractUpdates(t *testing.T) {
 							{
 								DepName:      "gitea",
 								CurrentValue: "10.0.0",
-								Datasource:   "helm",
+								Datasource:   DatasourceHelm,
 								Updates: []Update{
 									{NewValue: "10.1.0", UpdateType: "minor"},
 								},
@@ -82,7 +82,7 @@ func TestExtractUpdates(t *testing.T) {
 							{
 								DepName:      "postgres",
 								CurrentValue: "15.0",
-								Datasource:   "docker",
+								Datasource:   DatasourceDocker,
 								Updates: []Update{
 									{NewValue: "15.1", UpdateType: "patch"},
 								},
@@ -97,7 +97,7 @@ func TestExtractUpdates(t *testing.T) {
 							{
 								DepName:      "linuxserver/bazarr",
 								CurrentValue: "1.2.0",
-								Datasource:   "docker",
+								Datasource:   DatasourceDocker,
 								Updates: []Update{
 									{NewValue: "1.3.0", UpdateType: "minor"},
 								},
@@ -118,13 +118,13 @@ func TestExtractUpdates(t *testing.T) {
 							{
 								DepName:      "gitea",
 								CurrentValue: "10.0.0",
-								Datasource:   "helm",
+								Datasource:   DatasourceHelm,
 								Updates:      []Update{}, // No updates
 							},
 							{
 								DepName:      "redis",
 								CurrentValue: "7.0.0",
-								Datasource:   "helm",
+								Datasource:   DatasourceHelm,
 								Updates: []Update{
 									{NewValue: "7.1.0", UpdateType: "minor"},
 								},
@@ -160,7 +160,7 @@ func TestUpdateInfoFields(t *testing.T) {
 					{
 						DepName:      "gitea",
 						CurrentValue: "10.0.0",
-						Datasource:   "helm",
+						Datasource:   DatasourceHelm,
 						Updates: []Update{
 							{NewValue: "10.1.0", UpdateType: "minor"},
 						},
@@ -193,7 +193,7 @@ func TestUpdateInfoFields(t *testing.T) {
 	if u.UpdateType != "minor" {
 		t.Errorf("UpdateType = %q, want %q", u.UpdateType, "minor")
 	}
-	if u.Datasource != "helm" {
-		t.Errorf("Datasource = %q, want %q", u.Datasource, "helm")
+	if u.Datasource != DatasourceHelm {
+		t.Errorf("Datasource = %q, want %q", u.Datasource, DatasourceHelm)
 	}
 }

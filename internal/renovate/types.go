@@ -16,6 +16,12 @@ limitations under the License.
 
 package renovate
 
+// Datasource constants for Renovate dependencies
+const (
+	DatasourceHelm   = "helm"
+	DatasourceDocker = "docker"
+)
+
 // RenovateLogEntry represents the JSON log line with updates from Renovate
 type RenovateLogEntry struct {
 	Name   string          `json:"name"`
