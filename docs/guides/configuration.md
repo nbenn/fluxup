@@ -87,6 +87,64 @@ versionPolicy:
 
 > **Note:** For image updates, `versionPath` is required. There is no sensible default for image tag locations.
 
+### App-of-Apps Pattern (suspendRef)
+
+In Flux, it's common to use an "app-of-apps" pattern where a root Kustomization manages child Kustomizations:
+
+```
+root-kustomization (flux-system)     ← root, not managed by another Kustomization
+  └── app-kustomization (apps)       ← managed by root
+        └── HelmRelease
+              └── StatefulSet
+```
+
+**The Problem:** When FluxUp suspends the child `app-kustomization` during an upgrade, the parent `root-kustomization` may reconcile and set `suspend: false` back on the child - potentially corrupting data mid-upgrade.
+
+**The Solution:** Use `suspendRef` to tell FluxUp to suspend the root Kustomization instead:
+
+```yaml
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: my-app
+spec:
+  gitPath: "flux/apps/my-app/helmrelease.yaml"
+
+  # Where Git changes are made (the child Kustomization)
+  kustomizationRef:
+    name: my-app
+    namespace: apps
+
+  # What to suspend (the root Kustomization)
+  suspendRef:
+    name: root-apps
+    namespace: flux-system
+
+  workloadRef:
+    kind: StatefulSet
+    name: my-app
+```
+
+**How FluxUp detects this:**
+- If `kustomizationRef` points to a Kustomization that is managed by another Kustomization (detected via owner references or Flux labels), FluxUp will fail with a clear error message
+- The error tells you to set `suspendRef` to a root Kustomization
+
+**Trade-offs:**
+- Suspending a parent Kustomization means sibling apps won't reconcile during the upgrade window (typically minutes)
+- This is safer than risking the child being un-suspended mid-operation
+- Only the target workload is scaled down; sibling apps continue running
+
+### Auto-Rollback
+
+Enable automatic rollback when upgrades fail after the Git commit (point of no return):
+
+```yaml
+spec:
+  autoRollback: true  # default: false
+```
+
+When enabled, if an upgrade fails during reconciliation or health checks, FluxUp automatically creates a `RollbackRequest` to restore the previous version and data.
+
 ### Health Check Configuration
 
 Customize health check behavior:

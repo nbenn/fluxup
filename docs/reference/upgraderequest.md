@@ -41,10 +41,20 @@ kind: UpgradeRequest
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `scaling` | ScalingStatus | Workload scaling details (if workloadRef configured) |
 | `snapshot` | SnapshotStatus | Pre-upgrade snapshot details |
 | `upgrade` | UpgradeStatus | Upgrade operation details |
 | `healthCheck` | HealthCheckStatus | Health check results |
 | `conditions` | []Condition | Progress and state conditions |
+
+### ScalingStatus
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `workloadKind` | string | Kind of the scaled workload (Deployment, StatefulSet) |
+| `workloadName` | string | Name of the scaled workload |
+| `originalReplicas` | int32 | Original replica count before scale-down |
+| `scaledDownAt` | Time | When scale-down completed |
 
 ### SnapshotStatus
 
@@ -77,6 +87,7 @@ kind: UpgradeRequest
 | Type | Description |
 |------|-------------|
 | `Suspended` | Flux Kustomization has been suspended |
+| `WorkloadScaled` | Workload scaling state (reason: `ScaledDown`, `ScaledUp`, or `ScalingSkipped`) |
 | `SnapshotReady` | Pre-upgrade snapshots are ready |
 | `GitCommitted` | Version change committed to Git |
 | `Reconciled` | Flux has reconciled the changes |

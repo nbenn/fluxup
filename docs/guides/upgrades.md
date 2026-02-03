@@ -11,11 +11,15 @@ This guide explains how to trigger application upgrades, monitor their progress,
 
 FluxUp upgrades follow a safe workflow:
 
-1. Suspend Flux reconciliation
-2. Create pre-upgrade volume snapshots (if configured)
-3. Commit version change to Git
-4. Resume Flux reconciliation
-5. Wait for health checks to pass
+1. Validate the upgrade request and suspend target
+2. Suspend Flux reconciliation
+3. Scale down workload to 0 (if `workloadRef` configured)
+4. Create pre-upgrade volume snapshots (if configured)
+5. Verify still suspended, then commit version change to Git
+6. Resume Flux reconciliation (Flux scales workload back up)
+7. Wait for health checks to pass
+
+**Why scale down before snapshot?** Scaling down ensures application-consistent snapshots. Without this, a database might be captured mid-transaction, leading to corruption if restored.
 
 ## Creating an Upgrade
 
@@ -134,6 +138,7 @@ FluxUp tracks progress through conditions:
 | Condition | Meaning |
 |-----------|---------|
 | `Suspended` | Flux Kustomization has been paused |
+| `WorkloadScaled` | Workload scaled down (or skipped if no `workloadRef`) |
 | `SnapshotReady` | Pre-upgrade snapshots are ready |
 | `GitCommitted` | Version change committed to Git |
 | `Reconciled` | Flux has applied the changes |
@@ -198,6 +203,42 @@ status:
 ```
 
 ## Troubleshooting
+
+### Invalid Suspend Target Error
+
+If you see an error like:
+
+```
+kustomization 'apps/my-app' is managed by 'flux-system/root-apps':
+set spec.suspendRef to a root Kustomization to prevent the parent
+from un-suspending the child during operations
+```
+
+This means your Kustomization is managed by a parent Kustomization (app-of-apps pattern). FluxUp detected this because suspending a managed Kustomization could lead to the parent un-suspending it mid-upgrade.
+
+**Solution:** Add `suspendRef` to your ManagedApp pointing to the root Kustomization:
+
+```yaml
+spec:
+  kustomizationRef:
+    name: my-app
+    namespace: apps
+  suspendRef:
+    name: root-apps      # The root/parent Kustomization
+    namespace: flux-system
+```
+
+See the [Configuration Guide](configuration.md#app-of-apps-pattern-suspendref) for more details.
+
+### Suspend Verification Failed
+
+If you see "kustomization was un-suspended externally", something resumed your Kustomization between the suspend step and the Git commit. This could be:
+
+- A parent Kustomization that wasn't included in `suspendRef`
+- External automation (e.g., a CI/CD pipeline)
+- Manual intervention
+
+**Solution:** Ensure `suspendRef` points to the true root Kustomization and that no external automation modifies the suspend state during upgrades.
 
 ### Upgrade Not Starting
 

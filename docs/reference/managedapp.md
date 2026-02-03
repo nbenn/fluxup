@@ -20,10 +20,12 @@ kind: ManagedApp
 |-------|------|----------|-------------|
 | `gitPath` | string | ✅ | Path to the manifest in Git |
 | `kustomizationRef` | ObjectReference | ✅ | Reference to the Flux Kustomization |
-| `workloadRef` | WorkloadReference | | Optional workload for health checks |
+| `suspendRef` | ObjectReference | | Kustomization to suspend (defaults to `kustomizationRef`). Use for app-of-apps patterns. |
+| `workloadRef` | WorkloadReference | | Optional workload for health checks and scaling |
 | `versionPolicy` | VersionPolicy | | Update policy configuration |
 | `healthCheck` | HealthCheckConfig | | Health check configuration |
 | `volumeSnapshots` | VolumeSnapshotConfig | | Pre-upgrade snapshot configuration |
+| `autoRollback` | boolean | | Enable automatic rollback on upgrade failure (default: false) |
 
 ### ObjectReference
 
@@ -152,6 +154,32 @@ spec:
       maxCount: 3
   healthCheck:
     timeout: "10m"
+```
+
+### App-of-Apps Pattern (with suspendRef)
+
+When using an app-of-apps pattern where a parent Kustomization manages child Kustomizations, use `suspendRef` to suspend the root:
+
+```yaml
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: my-app
+  namespace: default
+spec:
+  gitPath: "flux/apps/my-app/helmrelease.yaml"
+  # The child Kustomization where Git changes are made
+  kustomizationRef:
+    name: my-app
+    namespace: apps
+  # The root Kustomization to suspend (prevents parent from un-suspending child)
+  suspendRef:
+    name: root-apps
+    namespace: flux-system
+  workloadRef:
+    kind: StatefulSet
+    name: my-app
+  autoRollback: true  # Automatically rollback if upgrade fails
 ```
 
 ### Minimal Configuration

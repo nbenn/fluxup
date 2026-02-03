@@ -23,7 +23,7 @@ User creates UpgradeRequest
          ▼
 ┌────────────────────────┐
 │ 1. Validate request    │◀── Check ManagedApp exists, has update
-│                        │
+│    + validate suspend  │    Validate suspend target is root
 └──────────┬─────────────┘
            │
            ▼
@@ -34,37 +34,49 @@ User creates UpgradeRequest
            │
            ▼
 ┌────────────────────────┐
-│ 3. Create snapshots    │◀── Condition: SnapshotReady=False (InProgress)
-│    for configured PVCs │
+│ 3. Scale down          │◀── Condition: WorkloadScaled=True (reason=ScaledDown)
+│    workload to 0       │    Ensures clean shutdown before snapshot
 └──────────┬─────────────┘
            │
            ▼
 ┌────────────────────────┐
-│ 4. Wait for snapshots  │◀── Condition: SnapshotReady=True
+│ 4. Create snapshots    │◀── Condition: SnapshotReady=False (InProgress)
+│    for configured PVCs │    Now capturing application-consistent state
+└──────────┬─────────────┘
+           │
+           ▼
+┌────────────────────────┐
+│ 5. Wait for snapshots  │◀── Condition: SnapshotReady=True
 │    ReadyToUse = true   │
 └──────────┬─────────────┘
            │
            ▼
 ┌────────────────────────┐
-│ 5. Commit version      │◀── Condition: GitCommitted=True
+│ 6. Verify still        │◀── Re-verify suspend before point of no return
+│    suspended           │    Catch external un-suspend attempts
+└──────────┬─────────────┘
+           │
+           ▼
+┌────────────────────────┐
+│ 7. Commit version      │◀── Condition: GitCommitted=True
 │    change to Git       │
 └──────────┬─────────────┘
            │
            ▼
 ┌────────────────────────┐
-│ 6. Resume Flux         │◀── Condition: Suspended=False
-│    Kustomization       │
+│ 8. Resume Flux         │◀── Condition: Suspended=False
+│    Kustomization       │    Flux reconciles, scales workload back up
 └──────────┬─────────────┘
            │
            ▼
 ┌────────────────────────┐
-│ 7. Wait for Flux       │◀── Condition: Reconciled=True
+│ 9. Wait for Flux       │◀── Condition: Reconciled=True
 │    reconciliation      │
 └──────────┬─────────────┘
            │
            ▼
 ┌────────────────────────┐
-│ 8. Health check        │◀── Condition: Healthy=True
+│ 10. Health check       │◀── Condition: Healthy=True
 │    (HelmRelease Ready) │
 └──────────┬─────────────┘
            │
@@ -80,6 +92,8 @@ User creates UpgradeRequest
 ```
 
 The current step is **derived from conditions**: if `SnapshotReady=True` and `GitCommitted=False`, we're in the "committing" step.
+
+**Note:** Step 3 (scale down) only runs if `workloadRef` is configured. This ensures application-consistent snapshots by cleanly shutting down the workload before capturing PVC state.
 
 ---
 

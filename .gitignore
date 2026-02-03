@@ -2,7 +2,7 @@ CLAUDE.md
 
 # Build artifacts
 bin/
-coverage/
+/coverage/
 cover.out
 
 # Test infrastructure credentials
