@@ -22,8 +22,8 @@ jobs:
         with:
           version: v2.7.2
 
-  test:
-    name: Test
+  smoke:
+    name: Smoke Tests
     needs: lint
     runs-on: ubuntu-latest
     steps:
@@ -35,21 +35,21 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run tests
+      - name: Run smoke tests
         run: |
           go mod tidy
-          make test
+          make test-smoke
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: cover.out
-          fail_ci_if_error: false
+          name: coverage-smoke
+          path: cover-smoke.out
+          retention-days: 1
 
   integration:
     name: Integration Tests
-    needs: test
+    needs: smoke
     runs-on: ubuntu-latest
     services:
       gitea:
@@ -103,11 +103,18 @@ jobs:
           echo "GITEA_REPO=fluxup-test" >> $GITHUB_ENV
 
       - name: Run integration tests
-        run: go test -tags=integration -v ./internal/git/...
+        run: make test-integration
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-integration
+          path: cover-integration.out
+          retention-days: 1
 
   e2e:
     name: E2E Tests
-    needs: test
+    needs: smoke
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -128,3 +135,39 @@ jobs:
         run: |
           go mod tidy
           make test-e2e
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-e2e
+          path: cover-e2e.out
+          retention-days: 1
+
+  coverage:
+    name: Upload Coverage
+    needs: [smoke, integration, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Download all coverage artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+
+      - name: Merge coverage reports
+        run: make coverage-merge
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: cover.out
+          fail_ci_if_error: false

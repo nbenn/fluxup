@@ -57,9 +57,12 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+.PHONY: test-smoke
+test-smoke: manifests generate fmt vet setup-envtest ## Run smoke tests (unit tests) with coverage.
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover-smoke.out
+
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+test: test-smoke ## Alias for test-smoke.
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
@@ -83,7 +86,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -coverprofile cover-e2e.out -coverpkg=./...
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
@@ -91,8 +94,13 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: test-integration
-test-integration: ## Run integration tests (requires GITEA_* env vars)
-	go test -tags=integration -v ./internal/git/...
+test-integration: ## Run integration tests with coverage (requires GITEA_* env vars)
+	go test -tags=integration -v ./internal/git/... -coverprofile cover-integration.out -coverpkg=./...
+
+.PHONY: coverage-merge
+coverage-merge: gocovmerge ## Merge coverage profiles from all test suites.
+	@"$(GOCOVMERGE)" cover-*.out > cover.out 2>/dev/null || cp cover-smoke.out cover.out
+	@echo "Merged coverage written to cover.out"
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -189,10 +197,12 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GOCOVMERGE = $(LOCALBIN)/gocovmerge
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.7.1
 CONTROLLER_TOOLS_VERSION ?= v0.20.0
+GOCOVMERGE_VERSION ?= v0.0.0-20230424223518-5f7bfae00a88
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -232,6 +242,11 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: gocovmerge
+gocovmerge: $(GOCOVMERGE) ## Download gocovmerge locally if necessary.
+$(GOCOVMERGE): $(LOCALBIN)
+	$(call go-install-tool,$(GOCOVMERGE),github.com/wadey/gocovmerge,$(GOCOVMERGE_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
