@@ -94,8 +94,8 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: test-integration
-test-integration: ## Run integration tests with coverage (requires GITEA_* env vars)
-	go test -tags=integration -v ./internal/git/... -coverprofile cover-integration.out -coverpkg=./...
+test-integration: test-infra-up test-infra-seed ## Run integration tests with coverage
+	@bash -c 'set -a && source .devcontainer/test-infra/.env && set +a && go test -tags=integration -v ./internal/git/... -coverprofile cover-integration.out -coverpkg=./...'
 
 ##@ Test Infrastructure
 
@@ -108,12 +108,12 @@ test-infra-down: ## Stop Gitea test instance
 	@.devcontainer/test-infra/stop.sh
 
 .PHONY: test-infra-seed
-test-infra-seed: ## Seed test repository with manifests (requires test-infra-up first)
+test-infra-seed: test-infra-up ## Seed test repository with manifests
 	@.devcontainer/test-infra/seed-repo.sh
 
 .PHONY: test-fixtures
-test-fixtures: ## Run Renovate and capture output as test fixtures (requires test-infra-up + test-infra-seed)
-	@.devcontainer/test-infra/run-renovate.sh
+test-fixtures: test-infra-seed ## Run Renovate and capture output as test fixtures
+	@. .devcontainer/test-infra/.env && .devcontainer/test-infra/run-renovate.sh
 
 .PHONY: coverage-merge
 coverage-merge: gocovmerge ## Merge coverage profiles from all test suites.

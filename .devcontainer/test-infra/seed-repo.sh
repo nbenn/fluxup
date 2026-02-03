@@ -54,10 +54,14 @@ cp "${SCRIPT_DIR}/manifests/helmrepositories.yaml" flux/repositories/
 cp "${SCRIPT_DIR}/manifests/gitea-helmrelease.yaml" flux/apps/gitea/helmrelease.yaml
 cp "${SCRIPT_DIR}/manifests/redis-helmrelease.yaml" flux/apps/redis/helmrelease.yaml
 
-# Commit and push
+# Commit and push (skip if nothing changed)
 git add .
-git commit -m "Add test HelmRelease manifests" >/dev/null
-git push origin main >/dev/null 2>&1
+if git diff --cached --quiet; then
+    echo "  Repository already seeded, no changes needed"
+else
+    git commit -m "Add test HelmRelease manifests" >/dev/null
+    git push origin main >/dev/null 2>&1
+fi
 
 echo "  Uploaded: flux/repositories/helmrepositories.yaml"
 echo "  Uploaded: flux/apps/gitea/helmrelease.yaml"

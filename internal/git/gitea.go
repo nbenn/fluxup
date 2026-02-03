@@ -97,24 +97,43 @@ func (g *GiteaManager) ReadFile(ctx context.Context, path string) ([]byte, error
 
 // CommitFile commits a single file change
 func (g *GiteaManager) CommitFile(ctx context.Context, change FileChange, message string) (*CommitInfo, error) {
-	// Get current file SHA for update (required by Gitea API)
+	// Get current file SHA for update (required by Gitea API for updates)
 	existing, _, _ := g.client.GetContents(g.owner, g.repo, g.branch, change.Path)
 
+	content := base64.StdEncoding.EncodeToString(change.Content)
+
+	// Use CreateFile for new files, UpdateFile for existing ones
+	if existing == nil || existing.SHA == "" {
+		opts := gitea.CreateFileOptions{
+			FileOptions: gitea.FileOptions{
+				Message:    message,
+				BranchName: g.branch,
+			},
+			Content: content,
+		}
+		resp, _, err := g.client.CreateFile(g.owner, g.repo, change.Path, opts)
+		if err != nil {
+			return nil, fmt.Errorf("creating file: %w", err)
+		}
+		return &CommitInfo{
+			SHA:     resp.Commit.SHA,
+			Message: message,
+			URL:     resp.Commit.HTMLURL,
+		}, nil
+	}
+
+	// Update existing file
 	opts := gitea.UpdateFileOptions{
 		FileOptions: gitea.FileOptions{
 			Message:    message,
 			BranchName: g.branch,
 		},
-		Content: base64.StdEncoding.EncodeToString(change.Content),
+		Content: content,
+		SHA:     existing.SHA,
 	}
-
-	if existing != nil && existing.SHA != "" {
-		opts.SHA = existing.SHA
-	}
-
 	resp, _, err := g.client.UpdateFile(g.owner, g.repo, change.Path, opts)
 	if err != nil {
-		return nil, fmt.Errorf("committing file: %w", err)
+		return nil, fmt.Errorf("updating file: %w", err)
 	}
 
 	return &CommitInfo{

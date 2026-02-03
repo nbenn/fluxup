@@ -83,6 +83,60 @@ Full documentation is available at **[nbenn.github.io/fluxup](https://nbenn.gith
 - [UpgradeRequest Reference](https://nbenn.github.io/fluxup/reference/upgraderequest/)
 - [Renovate Integration](https://nbenn.github.io/fluxup/guides/renovate/)
 
+## Development
+
+### Prerequisites
+
+The project includes a **devcontainer** configuration that provides all necessary tools:
+- Go 1.25
+- Docker-in-Docker
+- Kind (Kubernetes in Docker)
+- Kubebuilder
+- kubectl
+
+To use it, open the project in VS Code with the Dev Containers extension, or use GitHub Codespaces.
+
+### Running Tests
+
+```bash
+# Unit tests (fast, no external dependencies)
+make test
+
+# Lint
+make lint
+
+# Integration tests (starts Gitea container automatically)
+make test-integration
+
+# E2E tests (creates Kind cluster, deploys controller)
+make test-e2e
+
+# Stop test infrastructure when done
+make test-infra-down
+```
+
+### Test Infrastructure
+
+The project uses containerized test infrastructure:
+
+| Component | Purpose | Started By |
+|-----------|---------|------------|
+| **Gitea** | Git server for integration tests | `make test-infra-up` |
+| **Renovate** | Version detection (runs on-demand) | `make test-fixtures` |
+| **Kind** | Kubernetes cluster for e2e tests | `make test-e2e` |
+
+Integration tests (`make test-integration`) automatically start Gitea if needed. E2E tests (`make test-e2e`) automatically create a Kind cluster and install CertManager.
+
+### Regenerating Renovate Fixtures
+
+To update the Renovate test fixtures with real output:
+
+```bash
+make test-fixtures
+```
+
+This starts Gitea, seeds a test repository, runs Renovate in dry-run mode, and captures the JSON output to `test/fixtures/renovate/`.
+
 ## Design Documentation
 
 For architecture and implementation details, see:
