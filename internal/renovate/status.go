@@ -23,9 +23,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
+	"github.com/nbenn/fluxup/internal/logging"
 )
 
 // StatusUpdater updates ManagedApp status based on Renovate output
@@ -46,7 +46,7 @@ func NewStatusUpdater(c client.Client, namespace, configMapName string) *StatusU
 
 // ProcessRenovateOutput parses Renovate output and updates ManagedApp statuses
 func (u *StatusUpdater) ProcessRenovateOutput(ctx context.Context) error {
-	logger := log.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	// Parse updates from ConfigMap
 	updates, err := u.parser.Parse(ctx)
@@ -55,11 +55,11 @@ func (u *StatusUpdater) ProcessRenovateOutput(ctx context.Context) error {
 	}
 
 	if len(updates) == 0 {
-		logger.Info("No updates found in Renovate output")
+		logger.Debug("no updates found in Renovate output")
 		return nil
 	}
 
-	logger.Info("Found updates in Renovate output", "count", len(updates))
+	logger.Info("found updates in Renovate output", "count", len(updates))
 
 	// Map updates to ManagedApps
 	mapped, err := u.mapper.MapUpdatesToManagedApps(ctx, updates)
@@ -70,10 +70,10 @@ func (u *StatusUpdater) ProcessRenovateOutput(ctx context.Context) error {
 	// Update each ManagedApp's status
 	for appKey, versionInfo := range mapped {
 		if err := u.updateManagedAppStatus(ctx, appKey, versionInfo); err != nil {
-			logger.Error(err, "Failed to update ManagedApp status", "app", appKey)
+			logger.Error("failed to update ManagedApp status", "app", appKey, "error", err)
 			continue
 		}
-		logger.Info("Updated ManagedApp with available update", "app", appKey)
+		logger.Info("updated ManagedApp with available update", "app", appKey)
 	}
 
 	return nil

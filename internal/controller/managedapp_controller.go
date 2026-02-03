@@ -31,10 +31,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
+	"github.com/nbenn/fluxup/internal/logging"
 )
 
 // ManagedAppReconciler reconciles a ManagedApp object
@@ -53,7 +53,7 @@ type ManagedAppReconciler struct {
 
 // Reconcile reconciles a ManagedApp resource
 func (r *ManagedAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	// 1. Fetch the ManagedApp
 	var app fluxupv1alpha1.ManagedApp
@@ -61,7 +61,7 @@ func (r *ManagedAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	logger.Info("Reconciling ManagedApp", "gitPath", app.Spec.GitPath)
+	logger.Info("reconciling ManagedApp", "gitPath", app.Spec.GitPath)
 
 	// 2. Check workload health
 	ready, err := r.checkWorkloadHealth(ctx, &app)
@@ -75,7 +75,7 @@ func (r *ManagedAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			ObservedGeneration: app.Generation,
 		})
 		if updateErr := r.Status().Update(ctx, &app); updateErr != nil {
-			logger.Error(updateErr, "Failed to update status")
+			logger.Error("failed to update status", "error", updateErr)
 		}
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}

@@ -23,9 +23,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	"github.com/nbenn/fluxup/internal/logging"
 	"github.com/nbenn/fluxup/internal/renovate"
 )
 
@@ -47,16 +47,16 @@ type UpdatesConfigMapReconciler struct {
 
 // Reconcile processes the Renovate updates ConfigMap
 func (r *UpdatesConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	// Only process our specific ConfigMap
 	if req.Name != UpdatesConfigMapName || req.Namespace != UpdatesConfigMapNamespace {
 		return ctrl.Result{}, nil
 	}
 
-	logger.Info("Processing Renovate updates ConfigMap")
+	logger.Info("processing Renovate updates ConfigMap")
 	if err := r.StatusUpdater.ProcessRenovateOutput(ctx); err != nil {
-		logger.Error(err, "Failed to process Renovate output")
+		logger.Error("failed to process Renovate output", "error", err)
 		return ctrl.Result{}, err
 	}
 

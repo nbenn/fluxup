@@ -20,3 +20,8 @@ ignore:
   - "test/**/*"
   - "config/**/*"
   - "hack/**/*"
+  # Generated files
+  - "api/v1alpha1/zz_generated.deepcopy.go"
+  # Test helpers / mocks
+  - "internal/git/mock.go"
+  - "internal/git/interface.go"

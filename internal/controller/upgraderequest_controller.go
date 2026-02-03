@@ -19,20 +19,20 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
-	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
 	"github.com/nbenn/fluxup/internal/flux"
 	"github.com/nbenn/fluxup/internal/git"
+	"github.com/nbenn/fluxup/internal/logging"
 	"github.com/nbenn/fluxup/internal/snapshot"
 	yamlpkg "github.com/nbenn/fluxup/internal/yaml"
 )
@@ -61,7 +61,7 @@ type UpgradeRequestReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 
 func (r *UpgradeRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	// 1. Fetch UpgradeRequest
 	var upgrade fluxupv1alpha1.UpgradeRequest
@@ -69,7 +69,7 @@ func (r *UpgradeRequestReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	logger.Info("Reconciling UpgradeRequest",
+	logger.Info("reconciling UpgradeRequest",
 		"managedApp", upgrade.Spec.ManagedAppRef.Name)
 
 	// 2. Check if already complete (terminal state)
@@ -109,8 +109,8 @@ func (r *UpgradeRequestReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 // handleDryRun validates the upgrade without making any changes
 func (r *UpgradeRequestReconciler) handleDryRun(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	logger.Info("Processing dry run")
+	logger := logging.FromContext(ctx)
+	logger.Info("processing dry run")
 
 	// Fetch the ManagedApp
 	app, err := r.getManagedApp(ctx, upgrade)
@@ -155,7 +155,7 @@ func (r *UpgradeRequestReconciler) handleDryRun(ctx context.Context, upgrade *fl
 
 // handleSuspend validates the request and suspends Flux
 func (r *UpgradeRequestReconciler) handleSuspend(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	// Fetch the ManagedApp
 	app, err := r.getManagedApp(ctx, upgrade)
@@ -174,7 +174,7 @@ func (r *UpgradeRequestReconciler) handleSuspend(ctx context.Context, upgrade *f
 		targetVersion = app.Status.AvailableUpdate
 	}
 
-	logger.Info("Starting upgrade",
+	logger.Info("starting upgrade",
 		"app", app.Name,
 		"currentVersion", app.Status.CurrentVersion,
 		"targetVersion", targetVersion)
@@ -219,7 +219,7 @@ func (r *UpgradeRequestReconciler) handleSuspend(ctx context.Context, upgrade *f
 
 // handleSnapshotting creates pre-upgrade snapshots
 func (r *UpgradeRequestReconciler) handleSnapshotting(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	app, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
@@ -255,7 +255,7 @@ func (r *UpgradeRequestReconciler) handleSnapshotting(ctx context.Context, upgra
 			return ctrl.Result{}, err
 		}
 
-		logger.Info("Created pre-upgrade snapshots", "count", len(snapshots))
+		logger.Info("created pre-upgrade snapshots", "count", len(snapshots))
 	}
 
 	// Check if all snapshots are ready (non-blocking check)
@@ -272,7 +272,7 @@ func (r *UpgradeRequestReconciler) handleSnapshotting(ctx context.Context, upgra
 	}
 
 	if !allReady {
-		logger.Info("Waiting for snapshots to become ready")
+		logger.Debug("waiting for snapshots to become ready")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
@@ -296,7 +296,7 @@ func (r *UpgradeRequestReconciler) handleSnapshotting(ctx context.Context, upgra
 
 // handleCommitting commits the version change to Git
 func (r *UpgradeRequestReconciler) handleCommitting(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	app, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
@@ -370,7 +370,7 @@ func (r *UpgradeRequestReconciler) handleCommitting(ctx context.Context, upgrade
 		return r.setFailed(ctx, upgrade, "GitCommitFailed", err.Error())
 	}
 
-	logger.Info("Committed version change to Git",
+	logger.Info("committed version change to Git",
 		"commit", commitInfo.SHA,
 		"newVersion", newVersionStr)
 
@@ -400,7 +400,7 @@ func (r *UpgradeRequestReconciler) handleCommitting(ctx context.Context, upgrade
 
 // handleReconciling resumes Flux and waits for reconciliation
 func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	app, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
@@ -431,7 +431,7 @@ func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrad
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("Resumed Flux Kustomization, waiting for reconciliation")
+	logger.Info("resumed Flux Kustomization, waiting for reconciliation")
 
 	// Check if reconciliation is complete (non-blocking)
 	reconciled, err := r.FluxHelper.IsReconciled(ctx, ksRef.Name, ksNS)
@@ -469,7 +469,7 @@ func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrad
 
 // handleHealthChecking verifies the upgrade succeeded
 func (r *UpgradeRequestReconciler) handleHealthChecking(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	app, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
@@ -501,12 +501,12 @@ func (r *UpgradeRequestReconciler) handleHealthChecking(ctx context.Context, upg
 			}
 		}
 
-		logger.Info("Workload not yet healthy, waiting...")
+		logger.Debug("workload not yet healthy, waiting")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	// Health check passed
-	logger.Info("Health check passed, upgrade complete")
+	logger.Info("health check passed, upgrade complete")
 
 	now := metav1.Now()
 	upgrade.Status.HealthCheck = &fluxupv1alpha1.HealthCheckStatus{
@@ -534,7 +534,7 @@ func (r *UpgradeRequestReconciler) handleHealthChecking(ctx context.Context, upg
 
 // handleCompleted marks the upgrade as complete and updates ManagedApp
 func (r *UpgradeRequestReconciler) handleCompleted(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := logging.FromContext(ctx)
 
 	app, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
@@ -546,7 +546,7 @@ func (r *UpgradeRequestReconciler) handleCompleted(ctx context.Context, upgrade 
 		versionStr = upgrade.Status.Upgrade.NewVersion.Chart
 	}
 
-	logger.Info("Upgrade complete", "newVersion", versionStr)
+	logger.Info("upgrade complete", "newVersion", versionStr)
 
 	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
 		Type:               fluxupv1alpha1.ConditionTypeComplete,
@@ -558,7 +558,7 @@ func (r *UpgradeRequestReconciler) handleCompleted(ctx context.Context, upgrade 
 
 	// Update ManagedApp's currentVersion and clear availableUpdate
 	if err := r.updateManagedAppAfterUpgrade(ctx, app, upgrade); err != nil {
-		logger.Error(err, "Failed to update ManagedApp status after upgrade")
+		logger.Error("failed to update ManagedApp status after upgrade", "error", err)
 	}
 
 	// Apply snapshot retention policy (prune old snapshots)
@@ -594,8 +594,8 @@ func (r *UpgradeRequestReconciler) getManagedApp(ctx context.Context, upgrade *f
 // - Before Git commit: Resume Kustomization, user can retry
 // - After Git commit: Rollback required (handled by Phase 3), do NOT resume
 func (r *UpgradeRequestReconciler) setFailed(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest, reason, message string) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	logger.Error(nil, "Upgrade failed", "reason", reason, "message", message)
+	logger := logging.FromContext(ctx)
+	logger.Error("upgrade failed", "reason", reason, "message", message)
 
 	gitCommitted := meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeGitCommitted)
 
@@ -610,7 +610,7 @@ func (r *UpgradeRequestReconciler) setFailed(ctx context.Context, upgrade *fluxu
 			Message:            fmt.Sprintf("%s - rollback required", message),
 			ObservedGeneration: upgrade.Generation,
 		})
-		logger.Info("Upgrade failed after Git commit - rollback required")
+		logger.Warn("upgrade failed after Git commit - rollback required")
 	} else {
 		// Before Git commit: safe to resume and abort
 		meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
@@ -631,7 +631,7 @@ func (r *UpgradeRequestReconciler) setFailed(ctx context.Context, upgrade *fluxu
 					ksNS = DefaultFluxNamespace
 				}
 				if resumeErr := r.FluxHelper.ResumeKustomization(ctx, ksRef.Name, ksNS); resumeErr != nil {
-					logger.Error(resumeErr, "Failed to resume Kustomization after failure")
+					logger.Error("failed to resume Kustomization after failure", "error", resumeErr)
 				} else {
 					meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
 						Type:               fluxupv1alpha1.ConditionTypeSuspended,
@@ -653,7 +653,7 @@ func (r *UpgradeRequestReconciler) setFailed(ctx context.Context, upgrade *fluxu
 }
 
 // applySnapshotRetention prunes old snapshots based on the retention policy
-func (r *UpgradeRequestReconciler) applySnapshotRetention(ctx context.Context, app *fluxupv1alpha1.ManagedApp, logger logr.Logger) {
+func (r *UpgradeRequestReconciler) applySnapshotRetention(ctx context.Context, app *fluxupv1alpha1.ManagedApp, logger *slog.Logger) {
 	// Determine maxCount from retention policy, defaulting to 3
 	maxCount := snapshot.DefaultMaxSnapshotCount
 	if app.Spec.VolumeSnapshots.RetentionPolicy != nil && app.Spec.VolumeSnapshots.RetentionPolicy.MaxCount != nil {
@@ -662,12 +662,12 @@ func (r *UpgradeRequestReconciler) applySnapshotRetention(ctx context.Context, a
 
 	deleted, err := r.SnapshotManager.ApplyRetentionPolicy(ctx, app.Name, app.Namespace, maxCount)
 	if err != nil {
-		logger.Error(err, "Failed to apply snapshot retention policy")
+		logger.Error("failed to apply snapshot retention policy", "error", err)
 		return
 	}
 
 	if deleted > 0 {
-		logger.Info("Pruned old snapshots", "deleted", deleted, "maxCount", maxCount)
+		logger.Info("pruned old snapshots", "deleted", deleted, "maxCount", maxCount)
 	}
 }
 
