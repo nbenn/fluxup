@@ -171,3 +171,100 @@ func (h *Helper) IsReconciled(ctx context.Context, name, namespace string) (bool
 
 	return false, nil
 }
+
+// ManagedByInfo contains information about the parent Kustomization if one exists
+type ManagedByInfo struct {
+	// IsManaged is true if this Kustomization is managed by another Kustomization
+	IsManaged bool
+	// ParentName is the name of the parent Kustomization (if managed)
+	ParentName string
+	// ParentNamespace is the namespace of the parent Kustomization (if managed)
+	ParentNamespace string
+}
+
+// IsManagedByKustomization checks if a Kustomization is managed by another Kustomization.
+// This is detected via owner references and Flux labels.
+func (h *Helper) IsManagedByKustomization(ctx context.Context, name, namespace string) (*ManagedByInfo, error) {
+	var ks kustomizev1.Kustomization
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+
+	if err := h.client.Get(ctx, key, &ks); err != nil {
+		return nil, fmt.Errorf("getting kustomization: %w", err)
+	}
+
+	// Check owner references for Kustomization parents
+	for _, ref := range ks.OwnerReferences {
+		if ref.APIVersion == kustomizev1.GroupVersion.String() && ref.Kind == "Kustomization" {
+			return &ManagedByInfo{
+				IsManaged:       true,
+				ParentName:      ref.Name,
+				ParentNamespace: namespace, // Owner refs are same-namespace
+			}, nil
+		}
+	}
+
+	// Check Flux labels that indicate management
+	// kustomize.toolkit.fluxcd.io/name and kustomize.toolkit.fluxcd.io/namespace
+	if parentName, ok := ks.Labels["kustomize.toolkit.fluxcd.io/name"]; ok {
+		parentNS := namespace
+		if ns, ok := ks.Labels["kustomize.toolkit.fluxcd.io/namespace"]; ok {
+			parentNS = ns
+		}
+		return &ManagedByInfo{
+			IsManaged:       true,
+			ParentName:      parentName,
+			ParentNamespace: parentNS,
+		}, nil
+	}
+
+	return &ManagedByInfo{IsManaged: false}, nil
+}
+
+// ValidateSuspendTarget validates that the suspend target is appropriate.
+// If suspendRef is nil, validates that kustomizationRef is a root (not managed).
+// If suspendRef is set, validates that it exists (the user explicitly chose it).
+func (h *Helper) ValidateSuspendTarget(ctx context.Context, kustomizationRef, suspendRef *struct{ Name, Namespace string }) error {
+	// Determine the actual suspend target
+	target := kustomizationRef
+	if suspendRef != nil {
+		target = suspendRef
+	}
+
+	// If no explicit suspendRef, check that kustomizationRef is a root
+	if suspendRef == nil {
+		managedBy, err := h.IsManagedByKustomization(ctx, kustomizationRef.Name, kustomizationRef.Namespace)
+		if err != nil {
+			return fmt.Errorf("checking if kustomization is managed: %w", err)
+		}
+
+		if managedBy.IsManaged {
+			return fmt.Errorf("kustomization '%s/%s' is managed by '%s/%s': set spec.suspendRef to a root Kustomization to prevent the parent from un-suspending the child during operations",
+				kustomizationRef.Namespace, kustomizationRef.Name,
+				managedBy.ParentNamespace, managedBy.ParentName)
+		}
+	}
+
+	// Verify the target exists
+	var ks kustomizev1.Kustomization
+	key := types.NamespacedName{Name: target.Name, Namespace: target.Namespace}
+	if err := h.client.Get(ctx, key, &ks); err != nil {
+		return fmt.Errorf("suspend target Kustomization '%s/%s' not found: %w", target.Namespace, target.Name, err)
+	}
+
+	return nil
+}
+
+// VerifyStillSuspended checks that a Kustomization is still suspended.
+// Use this before critical operations (PVC delete, Git commit) to catch external un-suspend.
+func (h *Helper) VerifyStillSuspended(ctx context.Context, name, namespace string) error {
+	suspended, err := h.IsSuspended(ctx, name, namespace)
+	if err != nil {
+		return fmt.Errorf("checking suspend state: %w", err)
+	}
+
+	if !suspended {
+		return fmt.Errorf("kustomization '%s/%s' was un-suspended externally: ensure no parent Kustomization or external automation manages the suspend state", namespace, name)
+	}
+
+	return nil
+}

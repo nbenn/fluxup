@@ -49,6 +49,13 @@ spec:
           spec:
             description: ManagedAppSpec defines the desired state of ManagedApp
             properties:
+              autoRollback:
+                default: false
+                description: |-
+                  AutoRollback enables automatic rollback when upgrades fail after Git commit.
+                  When enabled, a RollbackRequest is automatically created if the upgrade fails
+                  after the point of no return (Git commit).
+                type: boolean
               gitPath:
                 description: |-
                   Path to the manifest in Git (for matching Renovate output and editing)
@@ -65,6 +72,20 @@ spec:
               kustomizationRef:
                 description: Reference to the Flux Kustomization that reconciles this
                   app (for suspend/resume)
+                properties:
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              suspendRef:
+                description: |-
+                  SuspendRef specifies which Kustomization to suspend during upgrades/rollbacks.
+                  This is required for app-of-apps patterns where a parent Kustomization manages
+                  child Kustomizations. If not set, defaults to KustomizationRef.
+                  The referenced Kustomization must be a "root" - not managed by another Kustomization.
                 properties:
                   name:
                     type: string

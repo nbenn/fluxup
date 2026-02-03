@@ -25,6 +25,10 @@ const (
 	// ConditionTypeSuspended indicates the Flux Kustomization is suspended
 	ConditionTypeSuspended = "Suspended"
 
+	// ConditionTypeWorkloadScaled indicates workload scaling state
+	// Reason: ScaledDown (replicas=0) or ScaledUp (replicas restored)
+	ConditionTypeWorkloadScaled = "WorkloadScaled"
+
 	// ConditionTypeSnapshotReady indicates snapshots are ready
 	ConditionTypeSnapshotReady = "SnapshotReady"
 
@@ -63,6 +67,10 @@ type UpgradeRequestSpec struct {
 // UpgradeRequestStatus defines the observed state of UpgradeRequest
 // Progress is tracked via conditions (no phase field - following K8s API conventions)
 type UpgradeRequestStatus struct {
+	// Scaling information (original replica count before scale-down)
+	// +optional
+	Scaling *ScalingStatus `json:"scaling,omitempty"`
+
 	// Snapshot information
 	// +optional
 	Snapshot *SnapshotStatus `json:"snapshot,omitempty"`
@@ -85,6 +93,25 @@ type UpgradeRequestStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// ScalingStatus records workload scaling details
+type ScalingStatus struct {
+	// Kind of the scaled workload (Deployment, StatefulSet)
+	// +optional
+	WorkloadKind string `json:"workloadKind,omitempty"`
+
+	// Name of the scaled workload
+	// +optional
+	WorkloadName string `json:"workloadName,omitempty"`
+
+	// Original replica count before scale-down
+	// +optional
+	OriginalReplicas int32 `json:"originalReplicas,omitempty"`
+
+	// When scale-down completed
+	// +optional
+	ScaledDownAt *metav1.Time `json:"scaledDownAt,omitempty"`
 }
 
 // SnapshotStatus records snapshot creation details

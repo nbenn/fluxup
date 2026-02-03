@@ -34,6 +34,7 @@ import (
 	"github.com/nbenn/fluxup/internal/git"
 	"github.com/nbenn/fluxup/internal/logging"
 	"github.com/nbenn/fluxup/internal/snapshot"
+	"github.com/nbenn/fluxup/internal/workload"
 	yamlpkg "github.com/nbenn/fluxup/internal/yaml"
 )
 
@@ -47,6 +48,7 @@ type UpgradeRequestReconciler struct {
 	GitManager      git.Manager
 	SnapshotManager *snapshot.Manager
 	FluxHelper      *flux.Helper
+	WorkloadScaler  *workload.Scaler
 	YAMLEditor      *yamlpkg.Editor
 }
 
@@ -90,6 +92,18 @@ func (r *UpgradeRequestReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if !meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeSuspended) {
 		return r.handleSuspend(ctx, &upgrade)
 	}
+
+	// Check if workload needs to be scaled down (before snapshot for consistency)
+	// Only scale if there's a workloadRef configured
+	scaledCond := meta.FindStatusCondition(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeWorkloadScaled)
+	if scaledCond == nil || scaledCond.Reason != "ScaledDown" {
+		result, err, shouldContinue := r.handleScaleDown(ctx, &upgrade)
+		if !shouldContinue {
+			return result, err
+		}
+		// If shouldContinue is true, no workloadRef configured - skip scaling
+	}
+
 	if !meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeSnapshotReady) {
 		return r.handleSnapshotting(ctx, &upgrade)
 	}
@@ -179,14 +193,24 @@ func (r *UpgradeRequestReconciler) handleSuspend(ctx context.Context, upgrade *f
 		"currentVersion", app.Status.CurrentVersion,
 		"targetVersion", targetVersion)
 
-	// Suspend Flux Kustomization
+	// Determine which Kustomization to suspend (suspendRef or kustomizationRef)
+	suspendName, suspendNS := r.getSuspendTarget(app)
+
+	// Validate suspend target is appropriate (root if no explicit suspendRef)
 	ksRef := app.Spec.KustomizationRef
 	ksNS := ksRef.Namespace
 	if ksNS == "" {
 		ksNS = DefaultFluxNamespace
 	}
 
-	if err := r.FluxHelper.SuspendKustomization(ctx, ksRef.Name, ksNS); err != nil {
+	if err := r.FluxHelper.ValidateSuspendTarget(ctx,
+		&struct{ Name, Namespace string }{Name: ksRef.Name, Namespace: ksNS},
+		r.getSuspendRefStruct(app)); err != nil {
+		return r.setFailed(ctx, upgrade, "InvalidSuspendTarget", err.Error())
+	}
+
+	// Suspend Flux Kustomization
+	if err := r.FluxHelper.SuspendKustomization(ctx, suspendName, suspendNS); err != nil {
 		return r.setFailed(ctx, upgrade, "SuspendFailed", err.Error())
 	}
 
@@ -195,7 +219,7 @@ func (r *UpgradeRequestReconciler) handleSuspend(ctx context.Context, upgrade *f
 		Type:               fluxupv1alpha1.ConditionTypeSuspended,
 		Status:             metav1.ConditionTrue,
 		Reason:             "KustomizationSuspended",
-		Message:            fmt.Sprintf("Suspended %s/%s", ksNS, ksRef.Name),
+		Message:            fmt.Sprintf("Suspended %s/%s", suspendNS, suspendName),
 		ObservedGeneration: upgrade.Generation,
 	})
 
@@ -215,6 +239,119 @@ func (r *UpgradeRequestReconciler) handleSuspend(ctx context.Context, upgrade *f
 	}
 
 	return ctrl.Result{Requeue: true}, nil
+}
+
+// getSuspendTarget returns the name and namespace of the Kustomization to suspend.
+// Uses suspendRef if set, otherwise falls back to kustomizationRef.
+func (r *UpgradeRequestReconciler) getSuspendTarget(app *fluxupv1alpha1.ManagedApp) (name, namespace string) {
+	if app.Spec.SuspendRef != nil {
+		namespace = app.Spec.SuspendRef.Namespace
+		if namespace == "" {
+			namespace = DefaultFluxNamespace
+		}
+		return app.Spec.SuspendRef.Name, namespace
+	}
+
+	namespace = app.Spec.KustomizationRef.Namespace
+	if namespace == "" {
+		namespace = DefaultFluxNamespace
+	}
+	return app.Spec.KustomizationRef.Name, namespace
+}
+
+// getSuspendRefStruct returns the suspendRef as a struct pointer for validation.
+// Returns nil if no suspendRef is configured.
+func (r *UpgradeRequestReconciler) getSuspendRefStruct(app *fluxupv1alpha1.ManagedApp) *struct{ Name, Namespace string } {
+	if app.Spec.SuspendRef == nil {
+		return nil
+	}
+	ns := app.Spec.SuspendRef.Namespace
+	if ns == "" {
+		ns = DefaultFluxNamespace
+	}
+	return &struct{ Name, Namespace string }{Name: app.Spec.SuspendRef.Name, Namespace: ns}
+}
+
+// handleScaleDown scales the workload to 0 replicas before snapshotting.
+// Returns (result, error, shouldContinue). If shouldContinue is true, no workload
+// is configured and the caller should continue to the next step.
+func (r *UpgradeRequestReconciler) handleScaleDown(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error, bool) {
+	logger := logging.FromContext(ctx)
+
+	app, err := r.getManagedApp(ctx, upgrade)
+	if err != nil {
+		result, err := r.setFailed(ctx, upgrade, "ManagedAppNotFound", err.Error())
+		return result, err, false
+	}
+
+	// If no workloadRef configured, skip scaling (return shouldContinue=true)
+	if app.Spec.WorkloadRef == nil {
+		logger.Debug("no workloadRef configured, skipping scale-down")
+		// Mark as scaled (skipped) so we don't check this again
+		meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
+			Type:               fluxupv1alpha1.ConditionTypeWorkloadScaled,
+			Status:             metav1.ConditionTrue,
+			Reason:             "ScalingSkipped",
+			Message:            "No workloadRef configured",
+			ObservedGeneration: upgrade.Generation,
+		})
+		if err := r.Status().Update(ctx, upgrade); err != nil {
+			return ctrl.Result{}, err, false
+		}
+		return ctrl.Result{Requeue: true}, nil, true
+	}
+
+	workloadRef := app.Spec.WorkloadRef
+	workloadNS := workloadRef.Namespace
+	if workloadNS == "" {
+		workloadNS = app.Namespace
+	}
+
+	// Scale down the workload
+	scaleInfo, err := r.WorkloadScaler.ScaleDown(ctx, workloadRef.Kind, workloadRef.Name, workloadNS)
+	if err != nil {
+		result, err := r.setFailed(ctx, upgrade, "ScaleDownFailed", err.Error())
+		return result, err, false
+	}
+
+	logger.Info("scaling down workload",
+		"kind", workloadRef.Kind,
+		"name", workloadRef.Name,
+		"originalReplicas", scaleInfo.OriginalReplicas)
+
+	// Record scaling info in status
+	now := metav1.Now()
+	upgrade.Status.Scaling = &fluxupv1alpha1.ScalingStatus{
+		WorkloadKind:     scaleInfo.Kind,
+		WorkloadName:     scaleInfo.Name,
+		OriginalReplicas: scaleInfo.OriginalReplicas,
+		ScaledDownAt:     &now,
+	}
+
+	// Wait for scale down to complete (with timeout)
+	scaleTimeout := 5 * time.Minute
+	if err := r.WorkloadScaler.WaitForScaleDown(ctx, workloadRef.Kind, workloadRef.Name, workloadNS, scaleTimeout); err != nil {
+		// Check if it's just not ready yet vs actual error
+		if ctx.Err() == nil {
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, false
+		}
+		result, err := r.setFailed(ctx, upgrade, "ScaleDownTimeout", err.Error())
+		return result, err, false
+	}
+
+	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
+		Type:               fluxupv1alpha1.ConditionTypeWorkloadScaled,
+		Status:             metav1.ConditionTrue,
+		Reason:             "ScaledDown",
+		Message:            fmt.Sprintf("Scaled %s/%s to 0 (was %d)", workloadRef.Kind, workloadRef.Name, scaleInfo.OriginalReplicas),
+		ObservedGeneration: upgrade.Generation,
+	})
+
+	if err := r.Status().Update(ctx, upgrade); err != nil {
+		return ctrl.Result{}, err, false
+	}
+
+	return ctrl.Result{Requeue: true}, nil, false
 }
 
 // handleSnapshotting creates pre-upgrade snapshots
@@ -301,6 +438,13 @@ func (r *UpgradeRequestReconciler) handleCommitting(ctx context.Context, upgrade
 	app, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
 		return r.setFailed(ctx, upgrade, "ManagedAppNotFound", err.Error())
+	}
+
+	// Re-verify suspend before Git commit (point of no return)
+	// This catches external un-suspend attempts before we commit
+	suspendName, suspendNS := r.getSuspendTarget(app)
+	if err := r.FluxHelper.VerifyStillSuspended(ctx, suspendName, suspendNS); err != nil {
+		return r.setFailed(ctx, upgrade, "SuspendVerificationFailed", err.Error())
 	}
 
 	// Get target version
@@ -407,14 +551,10 @@ func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrad
 		return r.setFailed(ctx, upgrade, "ManagedAppNotFound", err.Error())
 	}
 
-	// Resume Flux Kustomization
-	ksRef := app.Spec.KustomizationRef
-	ksNS := ksRef.Namespace
-	if ksNS == "" {
-		ksNS = DefaultFluxNamespace
-	}
+	// Resume the Kustomization we suspended (suspendRef or kustomizationRef)
+	suspendName, suspendNS := r.getSuspendTarget(app)
 
-	if err := r.FluxHelper.ResumeKustomization(ctx, ksRef.Name, ksNS); err != nil {
+	if err := r.FluxHelper.ResumeKustomization(ctx, suspendName, suspendNS); err != nil {
 		return r.setFailed(ctx, upgrade, "ResumeFailed", err.Error())
 	}
 
@@ -423,7 +563,7 @@ func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrad
 		Type:               fluxupv1alpha1.ConditionTypeSuspended,
 		Status:             metav1.ConditionFalse,
 		Reason:             "KustomizationResumed",
-		Message:            fmt.Sprintf("Resumed %s/%s", ksNS, ksRef.Name),
+		Message:            fmt.Sprintf("Resumed %s/%s", suspendNS, suspendName),
 		ObservedGeneration: upgrade.Generation,
 	})
 
@@ -434,6 +574,12 @@ func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrad
 	logger.Info("resumed Flux Kustomization, waiting for reconciliation")
 
 	// Check if reconciliation is complete (non-blocking)
+	// Check the kustomizationRef (the actual app's Kustomization), not suspendRef
+	ksRef := app.Spec.KustomizationRef
+	ksNS := ksRef.Namespace
+	if ksNS == "" {
+		ksNS = DefaultFluxNamespace
+	}
 	reconciled, err := r.FluxHelper.IsReconciled(ctx, ksRef.Name, ksNS)
 	if err != nil {
 		return r.setFailed(ctx, upgrade, "ReconciliationCheckFailed", err.Error())
@@ -625,12 +771,9 @@ func (r *UpgradeRequestReconciler) setFailed(ctx context.Context, upgrade *fluxu
 		if meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeSuspended) {
 			app, err := r.getManagedApp(ctx, upgrade)
 			if err == nil {
-				ksRef := app.Spec.KustomizationRef
-				ksNS := ksRef.Namespace
-				if ksNS == "" {
-					ksNS = DefaultFluxNamespace
-				}
-				if resumeErr := r.FluxHelper.ResumeKustomization(ctx, ksRef.Name, ksNS); resumeErr != nil {
+				// Resume the same Kustomization we suspended
+				suspendName, suspendNS := r.getSuspendTarget(app)
+				if resumeErr := r.FluxHelper.ResumeKustomization(ctx, suspendName, suspendNS); resumeErr != nil {
 					logger.Error("failed to resume Kustomization after failure", "error", resumeErr)
 				} else {
 					meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{

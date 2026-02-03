@@ -37,6 +37,13 @@ type ManagedAppSpec struct {
 	// +kubebuilder:validation:Required
 	KustomizationRef ObjectReference `json:"kustomizationRef"`
 
+	// SuspendRef specifies which Kustomization to suspend during upgrades/rollbacks.
+	// This is required for app-of-apps patterns where a parent Kustomization manages
+	// child Kustomizations. If not set, defaults to KustomizationRef.
+	// The referenced Kustomization must be a "root" - not managed by another Kustomization.
+	// +optional
+	SuspendRef *ObjectReference `json:"suspendRef,omitempty"`
+
 	// Optional: explicit workload reference for health checks
 	// If omitted, controller checks only the Kustomization status
 	// +optional
@@ -53,6 +60,12 @@ type ManagedAppSpec struct {
 	// Health check configuration
 	// +optional
 	HealthCheck *HealthCheckConfig `json:"healthCheck,omitempty"`
+
+	// AutoRollback enables automatic rollback when upgrades fail after Git commit.
+	// When enabled, a RollbackRequest is automatically created if the upgrade fails
+	// after the point of no return (Git commit).
+	// +kubebuilder:default=false
+	AutoRollback bool `json:"autoRollback,omitempty"`
 }
 
 // ObjectReference is a reference to a Kubernetes object

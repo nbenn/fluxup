@@ -179,6 +179,24 @@ spec:
                     description: 'Status: Passed, Failed, Pending'
                     type: string
                 type: object
+              scaling:
+                description: Scaling information (original replica count before scale-down)
+                properties:
+                  originalReplicas:
+                    description: Original replica count before scale-down
+                    format: int32
+                    type: integer
+                  scaledDownAt:
+                    description: When scale-down completed
+                    format: date-time
+                    type: string
+                  workloadKind:
+                    description: Kind of the scaled workload (Deployment, StatefulSet)
+                    type: string
+                  workloadName:
+                    description: Name of the scaled workload
+                    type: string
+                type: object
               snapshot:
                 description: Snapshot information
                 properties:
