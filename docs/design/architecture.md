@@ -791,6 +791,13 @@ rules:
 - [x] Workload scale down/up orchestration
 - [x] Auto-rollback on upgrade failure
 
+### MVP: Bug Fixes & Hardening
+Post-Phase 3 fixes required before production use. See [mvp.md](mvp.md) for details.
+- [ ] PVC-centric workload discovery (auto-detect workloads from PVC mounts)
+- [ ] Direct workload health checks (avoid stale ManagedApp conditions)
+- [ ] Fix dry run finalizer leak
+- [ ] Fix rollback timeout calculation
+
 ### Phase 4: Web UI
 - [ ] Embedded HTTP server
 - [ ] List ManagedApps with update status
