@@ -124,11 +124,17 @@ test-e2e-extract-coverage: ## Extract coverage data from e2e test pod and clean 
 	@POD=$$($(KUBECTL) get pods -n fluxup-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true; \
 	if [ -n "$$POD" ]; then \
 		echo "Found controller pod: $$POD"; \
-		echo "Signaling controller to write coverage data..."; \
-		$(KUBECTL) exec -n fluxup-system $$POD -- kill -USR1 1 2>/dev/null || true; \
-		sleep 2; \
+		echo "Signaling controller to write coverage data (SIGUSR1)..."; \
+		$(KUBECTL) exec -n fluxup-system $$POD -- kill -USR1 1; \
+		sleep 3; \
+		echo "Checking pod logs for coverage write confirmation..."; \
+		$(KUBECTL) logs -n fluxup-system $$POD --tail=20 2>/dev/null | grep -i coverage || echo "No coverage log messages found"; \
+		echo "Listing coverage files in pod..."; \
+		$(KUBECTL) exec -n fluxup-system $$POD -- ls -la /coverage 2>/dev/null || echo "Could not list /coverage"; \
 		echo "Copying coverage data from pod..."; \
-		$(KUBECTL) cp fluxup-system/$$POD:/coverage "$(COVERAGE_E2E)" 2>/dev/null && echo "Coverage data copied successfully" || echo "No coverage data found"; \
+		$(KUBECTL) cp fluxup-system/$$POD:/coverage/. "$(COVERAGE_E2E)"/ 2>/dev/null && echo "Coverage data copied" || echo "kubectl cp failed"; \
+		echo "Local coverage directory contents:"; \
+		ls -la "$(COVERAGE_E2E)" 2>/dev/null || echo "Local coverage directory empty or missing"; \
 	else \
 		echo "Controller pod not found, skipping coverage extraction"; \
 	fi

@@ -19,11 +19,15 @@ COPY . .
 # -covermode=atomic is required for accurate coverage with concurrent code
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -cover -covermode=atomic -a -o manager cmd/main.go
 
-# Use distroless as minimal base image to package the manager binary
-# Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+# For coverage builds, use alpine instead of distroless so we have shell tools
+# (needed to send signals and copy coverage data)
+FROM alpine:3.21
+# Install procps for kill command, create nonroot user matching distroless UID
+RUN apk add --no-cache procps && \
+    adduser -D -u 65532 -g 65532 nonroot
 WORKDIR /
 COPY --from=builder /workspace/manager .
+# Run as non-root user (same UID as distroless nonroot)
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]

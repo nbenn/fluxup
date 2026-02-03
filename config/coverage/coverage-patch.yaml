@@ -11,6 +11,14 @@ spec:
           env:
             - name: GOCOVERDIR
               value: /coverage
+          securityContext:
+            # Override readOnlyRootFilesystem for coverage builds
+            # The /coverage mount is writable via emptyDir
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - "ALL"
           volumeMounts:
             - name: coverage
               mountPath: /coverage

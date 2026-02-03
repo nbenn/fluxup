@@ -1304,12 +1304,13 @@ func (r *UpgradeRequestReconciler) createAutoRollback(ctx context.Context, upgra
 ## Implementation Order
 
 1. **Rename `WorkloadScaled` → `WorkloadStopped`** - Update condition constant and usages
-2. **RollbackRequest CRD** - Scaffold and define types
-3. **Snapshot manager additions** - `DeletePVC`, `RestorePVCFromSnapshot`, `WaitForPVCBound`
-4. **Git revert helper** - `FormatRevertCommitMessage`
-5. **RollbackRequest controller** - Main orchestration
-6. **Auto-rollback integration** - Update UpgradeRequest controller to create RollbackRequest on post-commit failure
-7. **Tests** - Unit and integration tests
+2. **Add finalizer to UpgradeRequest** - Protect in-progress upgrades from deletion
+3. **RollbackRequest CRD** - Scaffold and define types
+4. **Snapshot manager additions** - `DeletePVC`, `RestorePVCFromSnapshot`, `WaitForPVCBound`
+5. **Git revert helper** - `FormatRevertCommitMessage`
+6. **RollbackRequest controller** - Main orchestration (includes finalizer handling)
+7. **Auto-rollback integration** - Update UpgradeRequest controller to create RollbackRequest on post-commit failure
+8. **Tests** - Unit and integration tests
 
 **Already implemented in Phase 2:**
 - `autoRollback` and `suspendRef` fields in ManagedApp
@@ -1405,6 +1406,52 @@ The RollbackRequest controller needs permissions for workload scaling and PVC ma
 
 ---
 
+## Finalizer Protection
+
+Both UpgradeRequest and RollbackRequest use finalizers to prevent accidental deletion while in progress.
+
+### Finalizer Name
+
+```go
+const OperationFinalizer = "fluxup.dev/operation-protection"
+```
+
+### Behavior
+
+| State | Finalizer Present | Delete Behavior |
+|-------|-------------------|-----------------|
+| In progress (no `Complete` condition) | Yes | Blocked until operation completes or fails |
+| Completed (`Complete=True`) | No | Immediate deletion |
+| Failed (`Complete=False`) | No | Immediate deletion |
+
+### Implementation
+
+1. **Add finalizer on first reconcile** - Before starting any work
+2. **Remove finalizer when terminal** - After setting `Complete=True` or `Complete=False`
+3. **Handle deletion request** - If `DeletionTimestamp` is set and operation is in progress, log warning but continue operation to completion
+
+```go
+// At start of Reconcile, add finalizer if not present
+if !controllerutil.ContainsFinalizer(obj, OperationFinalizer) {
+    controllerutil.AddFinalizer(obj, OperationFinalizer)
+    if err := r.Update(ctx, obj); err != nil {
+        return ctrl.Result{}, err
+    }
+}
+
+// When setting Complete condition (success or failure), remove finalizer
+controllerutil.RemoveFinalizer(obj, OperationFinalizer)
+```
+
+### Auto-Rollback with Owner Reference
+
+Auto-created RollbackRequests have an owner reference to the failed UpgradeRequest:
+- Provides clear relationship between upgrade and rollback
+- Enables garbage collection when UpgradeRequest is deleted
+- Finalizer prevents deletion of in-progress rollbacks even if UpgradeRequest is deleted first
+
+---
+
 ## Resolved Decisions
 
 | Decision | Choice | Rationale |
@@ -1424,6 +1471,10 @@ The RollbackRequest controller needs permissions for workload scaling and PVC ma
 | Workload scale-up | Let Flux handle it | GitOps principle: desired state in Git, Flux enforces it |
 | Condition naming | `WorkloadStopped` instead of `WorkloadScaled` | Clearer semantics - True means workload is stopped, no ambiguity about direction |
 | Shared vs specific conditions | Shared: `Suspended`, `WorkloadStopped`, `Reconciled`, `Healthy`, `Complete`. Rollback-specific: `VolumesRestored`, `GitReverted` | Reuse where semantics match; distinct names for opposite operations (create snapshot vs restore, commit vs revert) |
+| Deletion protection | Finalizer on both UpgradeRequest and RollbackRequest | Prevent accidental deletion of in-progress operations; removed when terminal |
+| Auto-rollback ownership | Owner reference + finalizer | Clear relationship, enables GC, but finalizer prevents deletion while in progress |
+| Namespace handling | Same namespace required | RollbackRequest must be in same namespace as UpgradeRequest; simpler, consistent |
+| Precondition validation | Runtime (controller fails with error) | Consistent with UpgradeRequest; no webhook complexity |
 
 ---
 
@@ -1502,12 +1553,13 @@ Items identified during Phase 3 design that are deferred to future phases:
 All design questions are resolved. Implementation can proceed in this order:
 
 1. **Rename condition** - `WorkloadScaled` → `WorkloadStopped` in types and controller
-2. **RollbackRequest CRD** - Scaffold and define types (including shared condition constants)
-3. **Snapshot manager additions** - `DeletePVC`, `RestorePVCFromSnapshot`, `WaitForPVCBound`
-4. **Git revert helper** - `FormatRevertCommitMessage`
-5. **RollbackRequest controller** - Main orchestration
-6. **Auto-rollback integration** - Update UpgradeRequest controller to create RollbackRequest on failure
-7. **Tests** - Unit and integration tests
+2. **Add finalizer to UpgradeRequest** - Protect in-progress upgrades from deletion
+3. **RollbackRequest CRD** - Scaffold and define types (including shared condition constants)
+4. **Snapshot manager additions** - `DeletePVC`, `RestorePVCFromSnapshot`, `WaitForPVCBound`
+5. **Git revert helper** - `FormatRevertCommitMessage`
+6. **RollbackRequest controller** - Main orchestration (includes finalizer handling)
+7. **Auto-rollback integration** - Update UpgradeRequest controller to create RollbackRequest on failure
+8. **Tests** - Unit and integration tests
 
 See [Architecture](architecture.md#implementation-phases) for the full roadmap.
 

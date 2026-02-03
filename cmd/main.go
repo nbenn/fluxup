@@ -70,9 +70,12 @@ func setupCoverageSignalHandler() {
 	signal.Notify(c, syscall.SIGUSR1)
 	go func() {
 		for range c {
+			_, _ = os.Stderr.WriteString("coverage: received SIGUSR1, writing coverage data to " + coverDir + "\n")
+			// WriteCounters writes both meta and counter data needed for coverage
 			if err := coverage.WriteCountersDir(coverDir); err != nil {
-				// Log to stderr since logger may not be initialized yet
 				_, _ = os.Stderr.WriteString("coverage: failed to write counters: " + err.Error() + "\n")
+			} else {
+				_, _ = os.Stderr.WriteString("coverage: successfully wrote coverage data\n")
 			}
 		}
 	}()
