@@ -16,3 +16,6 @@ docs/node_modules/
 
 # OS
 .DS_Store
+
+# Test infrastructure credentials
+.devcontainer/test-infra/.env

@@ -1,0 +1,24 @@
+# Test HelmRelease with outdated chart version
+# Renovate should detect update from 10.0.0 to latest
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: gitea
+  namespace: gitea
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: gitea
+      version: "10.0.0"  # Outdated - Renovate should find newer versions
+      sourceRef:
+        kind: HelmRepository
+        name: gitea-charts
+        namespace: flux-system
+  values:
+    image:
+      repository: gitea/gitea
+      tag: "1.21.0"  # Also outdated for image update testing
+    persistence:
+      enabled: true
+      size: 10Gi

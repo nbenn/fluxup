@@ -1,0 +1,1 @@
+{"name":"renovate","level":20,"msg":"packageFiles with updates","config":{"helm-values":[{"packageFile":"flux/apps/redis/helmrelease.yaml","deps":[{"depName":"bitnami/redis","currentValue":"7.2.0","datasource":"docker","updates":[{"newValue":"7.2.4","updateType":"patch"}]}]}]}}

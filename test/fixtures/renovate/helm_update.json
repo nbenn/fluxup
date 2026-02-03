@@ -1,0 +1,1 @@
+{"name":"renovate","level":20,"msg":"packageFiles with updates","config":{"flux":[{"packageFile":"flux/apps/gitea/helmrelease.yaml","deps":[{"depName":"gitea","currentValue":"10.0.0","datasource":"helm","registryUrl":"https://dl.gitea.com/charts/","updates":[{"newValue":"10.4.1","updateType":"minor"}]}]}]}}
