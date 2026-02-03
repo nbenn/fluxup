@@ -34,6 +34,7 @@ type MockManager struct {
 
 	// Error injection
 	ReadFileErr        error
+	ReadFileErrors     map[string]error // Per-file read errors
 	CommitFileErr      error
 	CommitFilesErr     error
 	GetLatestCommitErr error
@@ -46,8 +47,9 @@ type MockManager struct {
 // NewMockManager creates a new mock Git manager
 func NewMockManager() *MockManager {
 	return &MockManager{
-		Files:   make(map[string][]byte),
-		Commits: make([]*CommitInfo, 0),
+		Files:          make(map[string][]byte),
+		Commits:        make([]*CommitInfo, 0),
+		ReadFileErrors: make(map[string]error),
 	}
 }
 
@@ -63,6 +65,11 @@ func (m *MockManager) ReadFile(ctx context.Context, path string) ([]byte, error)
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	// Check for per-file error
+	if err, ok := m.ReadFileErrors[path]; ok {
+		return nil, err
+	}
 
 	content, ok := m.Files[path]
 	if !ok {
@@ -141,6 +148,13 @@ func (m *MockManager) SetFile(path string, content []byte) {
 	m.Files[path] = content
 }
 
+// SetReadError sets an error to be returned when reading a specific file
+func (m *MockManager) SetReadError(path string, errMsg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ReadFileErrors[path] = fmt.Errorf("%s", errMsg)
+}
+
 // Reset clears all state
 func (m *MockManager) Reset() {
 	m.mu.Lock()
@@ -151,6 +165,7 @@ func (m *MockManager) Reset() {
 	m.ReadFileCalls = nil
 	m.CommitFileCalls = nil
 	m.ReadFileErr = nil
+	m.ReadFileErrors = make(map[string]error)
 	m.CommitFileErr = nil
 	m.CommitFilesErr = nil
 	m.GetLatestCommitErr = nil
