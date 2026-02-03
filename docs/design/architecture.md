@@ -784,11 +784,12 @@ rules:
 - [x] Dry run mode (validation only)
 - [x] Failure recovery (auto-resume Kustomization)
 
-### Phase 3: Rollback Workflow
-- [ ] RollbackRequest CRD and controller
-- [ ] PVC restore from VolumeSnapshot
-- [ ] Git revert functionality
-- [ ] Workload scale down/up orchestration
+### Phase 3: Rollback Workflow ✅
+- [x] RollbackRequest CRD and controller
+- [x] PVC restore from VolumeSnapshot
+- [x] Git revert functionality
+- [x] Workload scale down/up orchestration
+- [x] Auto-rollback on upgrade failure
 
 ### Phase 4: Web UI
 - [ ] Embedded HTTP server

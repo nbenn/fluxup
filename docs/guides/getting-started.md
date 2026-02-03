@@ -134,6 +134,8 @@ kubectl get upgraderequests -w
 
 - [Configuration Guide](configuration.md) - Configure Git backend and snapshots
 - [Triggering Upgrades](upgrades.md) - Learn about the upgrade workflow
+- [Rollback Guide](rollback.md) - Learn how to rollback failed upgrades
 - [ManagedApp Reference](../reference/managedapp.md) - Full CRD specification
 - [UpgradeRequest Reference](../reference/upgraderequest.md) - Full CRD specification
+- [RollbackRequest Reference](../reference/rollbackrequest.md) - Full CRD specification
 - [Renovate Integration](renovate.md) - Set up automatic update detection

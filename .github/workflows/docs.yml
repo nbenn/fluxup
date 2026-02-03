@@ -53,6 +53,8 @@ jobs:
                     items: [
                       { label: 'Getting Started', link: '/guides/getting-started/' },
                       { label: 'Configuration', link: '/guides/configuration/' },
+                      { label: 'Upgrades', link: '/guides/upgrades/' },
+                      { label: 'Rollback', link: '/guides/rollback/' },
                       { label: 'Renovate Integration', link: '/guides/renovate/' },
                     ],
                   },
@@ -60,6 +62,8 @@ jobs:
                     label: 'Reference',
                     items: [
                       { label: 'ManagedApp CRD', link: '/reference/managedapp/' },
+                      { label: 'UpgradeRequest CRD', link: '/reference/upgraderequest/' },
+                      { label: 'RollbackRequest CRD', link: '/reference/rollbackrequest/' },
                     ],
                   },
                 ],

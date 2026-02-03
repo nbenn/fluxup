@@ -142,6 +142,7 @@ For architecture and implementation details, see:
 - [Architecture & Design](docs/design/architecture.md)
 - [Phase 1 Design](docs/design/phase1.md)
 - [Phase 2 Design](docs/design/phase2.md)
+- [Phase 3 Design](docs/design/phase3.md)
 
 ## License
 
