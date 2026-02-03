@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -36,6 +37,8 @@ import (
 	"github.com/nbenn/fluxup/internal/snapshot"
 	yamlpkg "github.com/nbenn/fluxup/internal/yaml"
 )
+
+const testUpgradeName = "test-upgrade"
 
 func setupTestReconciler(_ *testing.T, objects ...client.Object) (*UpgradeRequestReconciler, *git.MockManager) {
 	scheme := runtime.NewScheme()
@@ -105,7 +108,7 @@ func reconcileUntilCondition(
 func TestUpgradeRequest_ManagedAppNotFound(t *testing.T) {
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
+			Name:      testUpgradeName,
 			Namespace: "default",
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
@@ -169,7 +172,7 @@ func TestUpgradeRequest_NoUpdateAvailable(t *testing.T) {
 
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
+			Name:      testUpgradeName,
 			Namespace: "default",
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
@@ -229,7 +232,7 @@ func TestUpgradeRequest_DryRun(t *testing.T) {
 
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
+			Name:      testUpgradeName,
 			Namespace: "default",
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
@@ -311,7 +314,7 @@ func TestUpgradeRequest_SuspendKustomization(t *testing.T) {
 
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
+			Name:      testUpgradeName,
 			Namespace: "default",
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
@@ -392,7 +395,7 @@ func TestUpgradeRequest_CommitToGit(t *testing.T) {
 
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
+			Name:      testUpgradeName,
 			Namespace: "default",
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
@@ -495,7 +498,7 @@ func TestUpgradeRequest_ImageUpdate(t *testing.T) {
 
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
+			Name:      testUpgradeName,
 			Namespace: "default",
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
@@ -597,7 +600,7 @@ func TestUpgradeRequest_ImageUpdateMissingVersionPath(t *testing.T) {
 
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
+			Name:      testUpgradeName,
 			Namespace: "default",
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
@@ -684,7 +687,7 @@ func TestUpgradeRequest_HandleReconciling(t *testing.T) {
 	// Include finalizer since upgrade is already in progress
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       "test-upgrade",
+			Name:       testUpgradeName,
 			Namespace:  "default",
 			Finalizers: []string{OperationFinalizer},
 		},
@@ -810,7 +813,7 @@ func TestUpgradeRequest_HandleHealthCheck(t *testing.T) {
 	now := metav1.Now()
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       "test-upgrade",
+			Name:       testUpgradeName,
 			Namespace:  "default",
 			Finalizers: []string{OperationFinalizer},
 		},
@@ -935,7 +938,7 @@ func TestUpgradeRequest_HandleCompleted(t *testing.T) {
 	now := metav1.Now()
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       "test-upgrade",
+			Name:       testUpgradeName,
 			Namespace:  "default",
 			Finalizers: []string{OperationFinalizer},
 		},
@@ -1066,7 +1069,7 @@ func TestUpgradeRequest_AlreadyComplete(t *testing.T) {
 	// Upgrade already complete
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
+			Name:      testUpgradeName,
 			Namespace: "default",
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
@@ -1126,7 +1129,7 @@ func TestUpgradeRequest_AlreadyFailed(t *testing.T) {
 	// Upgrade already failed (Complete=False)
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
+			Name:      testUpgradeName,
 			Namespace: "default",
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
@@ -1200,7 +1203,7 @@ func TestUpgradeRequest_FailureBeforeGitCommit_ResumesKustomization(t *testing.T
 	// Upgrade at Suspended stage, ready to commit (with finalizer)
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       "test-upgrade",
+			Name:       testUpgradeName,
 			Namespace:  "default",
 			Finalizers: []string{OperationFinalizer},
 		},
@@ -1315,7 +1318,7 @@ func TestUpgradeRequest_WithTargetVersion(t *testing.T) {
 
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-upgrade",
+			Name:      testUpgradeName,
 			Namespace: "default",
 		},
 		Spec: fluxupv1alpha1.UpgradeRequestSpec{
@@ -1350,5 +1353,172 @@ func TestUpgradeRequest_WithTargetVersion(t *testing.T) {
 	content := string(mockGit.CommitFileCalls[0].Content)
 	if !contains(content, "version: \"3.0.0\"") {
 		t.Errorf("expected version 3.0.0 in commit, got: %s", content)
+	}
+}
+
+func TestUpgradeRequest_AutoRollback_CreatesRollbackRequest(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: true, // Already suspended from the upgrade
+		},
+	}
+
+	// ManagedApp with autoRollback enabled
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+			AutoRollback: true, // Auto-rollback enabled
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeReady,
+					Status: metav1.ConditionFalse, // Unhealthy - will cause health check failure
+					Reason: "WorkloadUnhealthy",
+				},
+			},
+		},
+	}
+
+	// UpgradeRequest already at health check stage (with GitCommitted)
+	// Will fail health check and trigger auto-rollback
+	now := metav1.Now()
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testUpgradeName,
+			Namespace:  "default",
+			UID:        "test-uid-123",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionFalse,
+					Reason: "KustomizationResumed",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSnapshotReady,
+					Status: metav1.ConditionTrue,
+					Reason: "SnapshotsSkipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeGitCommitted,
+					Status: metav1.ConditionTrue,
+					Reason: "Committed",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeReconciled,
+					Status: metav1.ConditionTrue,
+					Reason: "ReconciliationSucceeded",
+				},
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+				StartedAt:       &now,
+			},
+			Snapshot: &fluxupv1alpha1.SnapshotStatus{
+				CreatedAt: &now,
+				PVCSnapshots: []fluxupv1alpha1.PVCSnapshotInfo{
+					{PVCName: "data-0", SnapshotName: "snap-1"},
+				},
+			},
+		},
+	}
+
+	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	// Keep reconciling - health check will fail, but we need to wait for timeout
+	// For the test, we'll set a very old StartedAt to trigger timeout
+	upgrade.Status.Upgrade.StartedAt = &metav1.Time{Time: now.Add(-10 * time.Minute)}
+	if err := r.Status().Update(ctx, upgrade); err != nil {
+		t.Fatalf("failed to update upgrade status: %v", err)
+	}
+
+	// Reconcile until Complete condition is set (should fail with auto-rollback)
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Check upgrade is marked failed
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "HealthCheckTimeout" {
+		t.Errorf("expected reason HealthCheckTimeout, got %s", completeCond.Reason)
+	}
+
+	// Check message indicates auto-rollback was initiated
+	if !contains(completeCond.Message, "auto-rollback initiated") {
+		t.Errorf("expected message to contain 'auto-rollback initiated', got: %s", completeCond.Message)
+	}
+
+	// Check that a RollbackRequest was created
+	var rollbackList fluxupv1alpha1.RollbackRequestList
+	if err := r.List(ctx, &rollbackList, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list rollback requests: %v", err)
+	}
+
+	if len(rollbackList.Items) != 1 {
+		t.Fatalf("expected 1 RollbackRequest to be created, got %d", len(rollbackList.Items))
+	}
+
+	rollback := rollbackList.Items[0]
+	if rollback.Spec.UpgradeRequestRef.Name != testUpgradeName {
+		t.Errorf("expected RollbackRequest to reference %s, got %s", testUpgradeName, rollback.Spec.UpgradeRequestRef.Name)
+	}
+	if !rollback.Spec.AutoTriggered {
+		t.Error("expected RollbackRequest.AutoTriggered to be true")
+	}
+
+	// Check owner reference
+	if len(rollback.OwnerReferences) != 1 {
+		t.Fatalf("expected 1 owner reference, got %d", len(rollback.OwnerReferences))
+	}
+	if rollback.OwnerReferences[0].Name != testUpgradeName {
+		t.Errorf("expected owner reference to %s, got %s", testUpgradeName, rollback.OwnerReferences[0].Name)
 	}
 }
