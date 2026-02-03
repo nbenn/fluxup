@@ -81,7 +81,14 @@ var _ = Describe("Manager", Ordered, func() {
 
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
 	// and deleting the namespace.
+	// When running with coverage (DEPLOY_COVERAGE=true), skip cleanup to allow coverage extraction.
 	AfterAll(func() {
+		// Skip cleanup when running with coverage - the Makefile handles extraction and teardown
+		if os.Getenv("DEPLOY_COVERAGE") == "true" {
+			By("skipping cleanup - coverage mode enabled, Makefile will handle teardown")
+			return
+		}
+
 		By("cleaning up the curl pod for metrics")
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
 		_, _ = utils.Run(cmd)

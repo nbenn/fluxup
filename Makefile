@@ -118,18 +118,26 @@ test-e2e-cover: test-e2e-up manifests generate fmt vet kustomize docker-build-co
 	$(MAKE) test-e2e-down
 
 .PHONY: test-e2e-extract-coverage
-test-e2e-extract-coverage: ## Extract coverage data from e2e test pod.
+test-e2e-extract-coverage: ## Extract coverage data from e2e test pod and clean up.
 	@mkdir -p "$(COVERAGE_E2E)"
-	@echo "Signaling controller to write coverage data..."
-	@POD=$$($(KUBECTL) get pods -n fluxup-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) && \
+	@echo "Extracting coverage data from controller pod..."
+	@POD=$$($(KUBECTL) get pods -n fluxup-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true; \
 	if [ -n "$$POD" ]; then \
+		echo "Found controller pod: $$POD"; \
+		echo "Signaling controller to write coverage data..."; \
 		$(KUBECTL) exec -n fluxup-system $$POD -- kill -USR1 1 2>/dev/null || true; \
 		sleep 2; \
 		echo "Copying coverage data from pod..."; \
-		$(KUBECTL) cp fluxup-system/$$POD:/coverage "$(COVERAGE_E2E)" 2>/dev/null || echo "No coverage data found"; \
+		$(KUBECTL) cp fluxup-system/$$POD:/coverage "$(COVERAGE_E2E)" 2>/dev/null && echo "Coverage data copied successfully" || echo "No coverage data found"; \
 	else \
 		echo "Controller pod not found, skipping coverage extraction"; \
 	fi
+	@# Clean up resources (normally done by AfterAll, skipped in coverage mode)
+	@echo "Cleaning up e2e test resources..."
+	@$(KUBECTL) delete pod curl-metrics -n fluxup-system --ignore-not-found 2>/dev/null || true
+	@$(MAKE) undeploy ignore-not-found=true 2>/dev/null || true
+	@$(MAKE) uninstall ignore-not-found=true 2>/dev/null || true
+	@$(KUBECTL) delete ns fluxup-system --ignore-not-found 2>/dev/null || true
 
 .PHONY: test-integration
 test-integration: test-integration-up ## Run integration tests with coverage

@@ -33,7 +33,7 @@ User creates RollbackRequest (or auto-triggered on upgrade failure)
            │
            ▼
 ┌────────────────────────┐
-│ 3. Scale down          │◀── Condition: WorkloadScaled=True (reason=ScaledDown)
+│ 3. Scale down          │◀── Condition: WorkloadStopped=True
 │    workload to 0       │    Required for PVC restore
 └──────────┬─────────────┘
            │
@@ -68,8 +68,8 @@ User creates RollbackRequest (or auto-triggered on upgrade failure)
            │
            ▼
 ┌────────────────────────┐
-│ 9. Wait for workload   │◀── Condition: WorkloadScaled=True (reason=ScaledUp)
-│    to scale up         │    Flux reconciles, restores replicas
+│ 9. Wait for workload   │◀── Flux reconciles, restores replicas
+│    to scale up         │    (WorkloadStopped remains True until Healthy)
 └──────────┬─────────────┘
            │
            ▼
@@ -196,7 +196,7 @@ User creates UpgradeRequest
            │
            ▼
 ┌────────────────────────┐
-│ 3. Scale down          │◀── NEW: Condition: WorkloadScaled=True (reason=ScaledDown)
+│ 3. Scale down          │◀── NEW: Condition: WorkloadStopped=True
 │    workload to 0       │    Ensures clean shutdown before snapshot
 └──────────┬─────────────┘
            │
@@ -413,29 +413,45 @@ type GitRevertStatus struct {
 
 ### 1.2 Condition Types
 
+RollbackRequest uses a mix of shared conditions (used by both UpgradeRequest and RollbackRequest) and rollback-specific conditions.
+
+**Shared Conditions** (defined once, used by both CRDs):
+
+| Condition | Meaning |
+|-----------|---------|
+| `Suspended` | Flux Kustomization is suspended |
+| `WorkloadStopped` | Workload scaled to 0 replicas |
+| `Reconciled` | Flux has reconciled changes |
+| `Healthy` | Post-operation health check passed |
+| `Complete` | Operation finished (check Reason for success/failure) |
+
+**Rollback-Specific Conditions:**
+
+| Condition | Meaning | Upgrade Equivalent |
+|-----------|---------|-------------------|
+| `VolumesRestored` | PVCs restored from snapshots | `SnapshotReady` (creates snapshots) |
+| `GitReverted` | Version reverted in Git | `GitCommitted` (commits new version) |
+
 ```go
+// Shared condition types (in a common location or upgraderequest_types.go)
 const (
-    // ConditionTypeSuspended indicates the Flux Kustomization is suspended
-    // (reused from UpgradeRequest)
-    // ConditionTypeSuspended = "Suspended"
+    ConditionTypeSuspended      = "Suspended"
+    ConditionTypeWorkloadStopped = "WorkloadStopped"
+    ConditionTypeReconciled     = "Reconciled"
+    ConditionTypeHealthy        = "Healthy"
+    ConditionTypeComplete       = "Complete"
+)
 
-    // ConditionTypeWorkloadScaled indicates workload scaling state
-    // Reason: ScaledDown (replicas=0) or ScaledUp (replicas restored)
-    ConditionTypeWorkloadScaled = "WorkloadScaled"
+// Upgrade-specific conditions
+const (
+    ConditionTypeSnapshotReady = "SnapshotReady"
+    ConditionTypeGitCommitted  = "GitCommitted"
+)
 
-    // ConditionTypeVolumesRestored indicates PVCs have been restored from snapshots
+// Rollback-specific conditions
+const (
     ConditionTypeVolumesRestored = "VolumesRestored"
-
-    // ConditionTypeGitReverted indicates the version has been reverted in Git
-    ConditionTypeGitReverted = "GitReverted"
-
-    // ConditionTypeHealthy indicates post-rollback health check passed
-    // (reused from UpgradeRequest)
-    // ConditionTypeHealthy = "Healthy"
-
-    // ConditionTypeComplete indicates the rollback is complete
-    // (reused from UpgradeRequest)
-    // ConditionTypeComplete = "Complete"
+    ConditionTypeGitReverted     = "GitReverted"
 )
 ```
 
@@ -586,7 +602,9 @@ func (m *Manager) DeletePVC(ctx context.Context, name, namespace string) error {
 
 ## Step 4: Workload Scaling
 
-### 4.1 Scale Helpers
+The workload scaler is already implemented in Phase 2 (`internal/workload/scaler.go`). No changes needed - we reuse `ScaleDown()` and `WaitForScaleDown()`.
+
+### 4.1 Scale Helpers (Already Implemented)
 
 ```go
 // internal/workload/scale.go
@@ -869,10 +887,9 @@ func (r *RollbackRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
         return r.handleSuspend(ctx, &rollback)
     }
 
-    // Check if scaled down (WorkloadScaled=True with reason=ScaledDown)
-    scaledCond := meta.FindStatusCondition(rollback.Status.Conditions, fluxupv1alpha1.ConditionTypeWorkloadScaled)
-    if scaledCond == nil || scaledCond.Reason != "ScaledDown" {
-        return r.handleScaleDown(ctx, &rollback)
+    // Check if workload is stopped
+    if !meta.IsStatusConditionTrue(rollback.Status.Conditions, fluxupv1alpha1.ConditionTypeWorkloadStopped) {
+        return r.handleStopWorkload(ctx, &rollback)
     }
 
     if !meta.IsStatusConditionTrue(rollback.Status.Conditions, fluxupv1alpha1.ConditionTypeVolumesRestored) {
@@ -888,10 +905,8 @@ func (r *RollbackRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
         return r.handleResume(ctx, &rollback)
     }
 
-    // Check if scaled up (WorkloadScaled=True with reason=ScaledUp)
-    if scaledCond == nil || scaledCond.Reason != "ScaledUp" {
-        return r.handleWaitForScaleUp(ctx, &rollback)
-    }
+    // No explicit "scale up" step - Flux handles it when resumed
+    // We just wait for Healthy=True
 
     if !meta.IsStatusConditionTrue(rollback.Status.Conditions, fluxupv1alpha1.ConditionTypeHealthy) {
         return r.handleHealthCheck(ctx, &rollback)
@@ -970,8 +985,8 @@ func (r *RollbackRequestReconciler) handleSuspend(ctx context.Context, rollback 
     return ctrl.Result{Requeue: true}, nil
 }
 
-// handleScaleDown scales the workload to 0 replicas
-func (r *RollbackRequestReconciler) handleScaleDown(ctx context.Context, rollback *fluxupv1alpha1.RollbackRequest) (ctrl.Result, error) {
+// handleStopWorkload scales the workload to 0 replicas
+func (r *RollbackRequestReconciler) handleStopWorkload(ctx context.Context, rollback *fluxupv1alpha1.RollbackRequest) (ctrl.Result, error) {
     logger := log.FromContext(ctx)
 
     upgrade, err := r.getUpgradeRequest(ctx, rollback)
@@ -988,33 +1003,30 @@ func (r *RollbackRequestReconciler) handleScaleDown(ctx context.Context, rollbac
     workloadRef := app.Spec.WorkloadRef
     scaleInfo, err := r.WorkloadScaler.ScaleDown(ctx, workloadRef.Kind, workloadRef.Name, app.Namespace)
     if err != nil {
-        return r.setFailed(ctx, rollback, "ScaleDownFailed", err.Error())
+        return r.setFailed(ctx, rollback, "StopWorkloadFailed", err.Error())
     }
 
-    logger.Info("Scaling down workload",
+    logger.Info("Stopping workload",
         "kind", workloadRef.Kind,
         "name", workloadRef.Name,
         "originalReplicas", scaleInfo.OriginalReplicas)
 
-    // Wait for scale down to complete
+    // Wait for workload to fully stop
     if err := r.WorkloadScaler.WaitForScaleDown(ctx, workloadRef.Kind, workloadRef.Name, app.Namespace, 5*time.Minute); err != nil {
         // Check if it's just not ready yet vs actual error
         if ctx.Err() == nil {
             return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
         }
-        return r.setFailed(ctx, rollback, "ScaleDownTimeout", err.Error())
+        return r.setFailed(ctx, rollback, "StopWorkloadTimeout", err.Error())
     }
 
     meta.SetStatusCondition(&rollback.Status.Conditions, metav1.Condition{
-        Type:               fluxupv1alpha1.ConditionTypeWorkloadScaled,
+        Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
         Status:             metav1.ConditionTrue,
-        Reason:             "ScaledDown",
-        Message:            fmt.Sprintf("Scaled %s/%s to 0 (was %d)", workloadRef.Kind, workloadRef.Name, scaleInfo.OriginalReplicas),
+        Reason:             "WorkloadStopped",
+        Message:            fmt.Sprintf("Stopped %s/%s (was %d replicas)", workloadRef.Kind, workloadRef.Name, scaleInfo.OriginalReplicas),
         ObservedGeneration: rollback.Generation,
     })
-
-    // Store original replicas in annotation for later restoration
-    // (Flux will restore this when it reconciles, but we track it for visibility)
 
     if err := r.Status().Update(ctx, rollback); err != nil {
         return ctrl.Result{}, err
@@ -1291,14 +1303,18 @@ func (r *UpgradeRequestReconciler) createAutoRollback(ctx context.Context, upgra
 
 ## Implementation Order
 
-1. **RollbackRequest CRD** - Scaffold and define types
-2. **ManagedApp updates** - Add `autoRollback` field
-3. **Workload scaler** - Scale down/up helpers
-4. **Snapshot manager additions** - PVC restore from snapshot
-5. **Git revert helper** - Commit message format
-6. **RollbackRequest controller** - Main orchestration
-7. **Auto-rollback integration** - Update UpgradeRequest controller
-8. **Tests** - Unit and integration tests
+1. **Rename `WorkloadScaled` → `WorkloadStopped`** - Update condition constant and usages
+2. **RollbackRequest CRD** - Scaffold and define types
+3. **Snapshot manager additions** - `DeletePVC`, `RestorePVCFromSnapshot`, `WaitForPVCBound`
+4. **Git revert helper** - `FormatRevertCommitMessage`
+5. **RollbackRequest controller** - Main orchestration
+6. **Auto-rollback integration** - Update UpgradeRequest controller to create RollbackRequest on post-commit failure
+7. **Tests** - Unit and integration tests
+
+**Already implemented in Phase 2:**
+- `autoRollback` and `suspendRef` fields in ManagedApp
+- Workload scaler (scale down/wait for scale down)
+- Scale down before snapshot in upgrade flow
 
 ---
 
@@ -1406,6 +1422,8 @@ The RollbackRequest controller needs permissions for workload scaling and PVC ma
 | Flux suspend target | Separate `suspendRef` field | Support app-of-apps; suspend root to prevent parent from un-suspending child |
 | Suspend target validation | Runtime check for root + periodic verification | Best-effort detection at start; re-verify before critical steps (PVC delete, Git commit) |
 | Workload scale-up | Let Flux handle it | GitOps principle: desired state in Git, Flux enforces it |
+| Condition naming | `WorkloadStopped` instead of `WorkloadScaled` | Clearer semantics - True means workload is stopped, no ambiguity about direction |
+| Shared vs specific conditions | Shared: `Suspended`, `WorkloadStopped`, `Reconciled`, `Healthy`, `Complete`. Rollback-specific: `VolumesRestored`, `GitReverted` | Reuse where semantics match; distinct names for opposite operations (create snapshot vs restore, commit vs revert) |
 
 ---
 
@@ -1446,13 +1464,13 @@ If pods get stuck in `Terminating` state (dead node, stuck finalizers):
 |------|---------|---------------------|----------|
 | 1. Validate | UpgradeRequest not found | No changes | Fix reference, retry |
 | 2. Suspend | Kustomization not found | No changes | Fix ManagedApp config, retry |
-| 3. Scale down | Timeout waiting for pods | Workload scaled to 0, pods terminating | Manual pod cleanup, retry |
-| 4. Delete PVCs | PVC stuck (finalizer) | Workload down, PVCs in Terminating | Wait for unmount or force-delete pods, retry |
-| 5. Create PVCs | Snapshot not found/ready | Workload down, old PVCs deleted | Manual PVC recreation needed |
-| 6. Wait for bind | PVC won't bind | Workload down, new PVCs pending | Check storage class, CSI driver |
-| 7. Git revert | API error | Workload down, PVCs restored, wrong version in Git | Retry or manual Git fix |
+| 3. Stop workload | Timeout waiting for pods | Workload stopped (replicas=0), pods terminating | Manual pod cleanup, retry |
+| 4. Delete PVCs | PVC stuck (finalizer) | Workload stopped, PVCs in Terminating | Wait for unmount or force-delete pods, retry |
+| 5. Create PVCs | Snapshot not found/ready | Workload stopped, old PVCs deleted | Manual PVC recreation needed |
+| 6. Wait for bind | PVC won't bind | Workload stopped, new PVCs pending | Check storage class, CSI driver |
+| 7. Git revert | API error | Workload stopped, PVCs restored, wrong version in Git | Retry or manual Git fix |
 | 8. Resume Flux | Kustomization error | PVCs restored, Git reverted, Flux suspended | Manual Flux resume |
-| 9. Scale up | Flux reconciliation fails | Everything restored, workload not starting | Debug app startup |
+| 9. Flux reconciles | Flux reconciliation fails | Everything restored, workload not starting | Debug app startup |
 | 10. Health check | Timeout | App running but unhealthy | Debug app, consider re-rollback |
 
 ### Point of No Return
@@ -1483,15 +1501,13 @@ Items identified during Phase 3 design that are deferred to future phases:
 
 All design questions are resolved. Implementation can proceed in this order:
 
-1. **Update UpgradeRequest controller** - Add scale-down before snapshot for consistent snapshots
-2. **RollbackRequest CRD** - Scaffold and define types
-3. **ManagedApp updates** - Add `autoRollback` and `suspendRef` fields
-4. **Workload scaler** - Scale down/up helpers (shared with upgrade flow)
-5. **Snapshot manager additions** - PVC delete, restore from snapshot, wait for bound
-6. **Git revert helper** - Commit message format
-7. **RollbackRequest controller** - Main orchestration
-8. **Auto-rollback integration** - Update UpgradeRequest controller to create RollbackRequest on failure
-9. **Tests** - Unit and integration tests
+1. **Rename condition** - `WorkloadScaled` → `WorkloadStopped` in types and controller
+2. **RollbackRequest CRD** - Scaffold and define types (including shared condition constants)
+3. **Snapshot manager additions** - `DeletePVC`, `RestorePVCFromSnapshot`, `WaitForPVCBound`
+4. **Git revert helper** - `FormatRevertCommitMessage`
+5. **RollbackRequest controller** - Main orchestration
+6. **Auto-rollback integration** - Update UpgradeRequest controller to create RollbackRequest on failure
+7. **Tests** - Unit and integration tests
 
 See [Architecture](architecture.md#implementation-phases) for the full roadmap.
 
@@ -1499,24 +1515,26 @@ See [Architecture](architecture.md#implementation-phases) for the full roadmap.
 
 ## Phase 2 Prerequisites
 
-Phase 3 requires changes to the existing Phase 2 implementation before rollback can work correctly. These are listed as step 1 in the implementation order above, but are detailed here for clarity:
+Most Phase 3 prerequisites are already implemented in Phase 2:
 
-### Required Changes to UpgradeRequest Controller
+### Already Implemented
+
+| Feature | Status |
+|---------|--------|
+| `autoRollback` field in ManagedApp | ✅ Implemented |
+| `suspendRef` field in ManagedApp | ✅ Implemented |
+| Workload scaler (`ScaleDown`, `WaitForScaleDown`) | ✅ Implemented |
+| Scale down before snapshot in upgrade flow | ✅ Implemented |
+| `WorkloadScaled` condition (rename to `WorkloadStopped`) | ⚠️ Needs rename |
+| Suspend target validation | ✅ Implemented |
+| Re-verify suspend before Git commit | ✅ Implemented |
+
+### Required Changes for Phase 3
 
 | Change | Reason |
 |--------|--------|
-| Scale down workload before snapshot | Application-consistent snapshots (clean shutdown, no in-flight transactions) |
-| Wait for PVC to be unmounted | Use `pvc-protection` finalizer to verify pods are gone |
-| Add `suspendRef` to ManagedApp | Support app-of-apps patterns where parent manages child Kustomizations |
-| Validate suspend target is root | Prevent parent from un-suspending child mid-operation |
-| Re-verify suspend before Git commit | Catch external un-suspend before point of no return |
+| Rename `WorkloadScaled` → `WorkloadStopped` | Clearer semantics (True = stopped, no directional ambiguity) |
 
-### Why These Are Prerequisites
-
-Rollback restores from snapshots created during upgrade. If the upgrade flow doesn't create consistent snapshots, rollback will restore inconsistent data. Therefore:
-
-1. **Snapshot consistency** must be fixed in the upgrade flow first
-2. **Suspend handling** must be robust in upgrade before we add rollback (same logic)
-3. **Workload scaler** is shared between upgrade and rollback
-
-The Phase 2 design document should be updated to reflect these changes once implemented.
+This rename affects:
+- `api/v1alpha1/upgraderequest_types.go` - condition constant
+- `internal/controller/upgraderequest_controller.go` - condition usage
