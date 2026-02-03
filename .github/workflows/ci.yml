@@ -51,14 +51,6 @@ jobs:
     name: Integration Tests
     needs: smoke
     runs-on: ubuntu-latest
-    services:
-      gitea:
-        image: gitea/gitea:latest
-        ports:
-          - 3000:3000
-        env:
-          GITEA__security__INSTALL_LOCK: "true"
-          GITEA__server__ROOT_URL: "http://localhost:3000"
     steps:
       - name: Clone the code
         uses: actions/checkout@v4
@@ -68,22 +60,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Wait for Gitea
-        run: |
-          for i in {1..30}; do
-            if curl -s http://localhost:3000/api/v1/version; then
-              echo "Gitea is ready"
-              break
-            fi
-            echo "Waiting for Gitea..."
-            sleep 2
-          done
-
       - name: Run integration tests
-        run: |
-          # Let start.sh detect the existing Gitea service
-          export GITEA_URL=http://localhost:3000
-          make test-integration
+        run: make test-integration
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
