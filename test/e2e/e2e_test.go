@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -267,16 +268,79 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
+	})
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+	Context("ManagedApp CR", func() {
+		const testManagedAppName = "test-managed-app"
+		// Use default namespace for testing
+		const testNamespace = "default"
+
+		AfterEach(func() {
+			// Clean up test resources
+			cmd := exec.Command("kubectl", "delete", "managedapp", testManagedAppName,
+				"-n", testNamespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should create a ManagedApp CR successfully", func() {
+			By("creating a ManagedApp CR")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  gitPath: "flux/apps/test-app/helmrelease.yaml"
+  kustomizationRef:
+    name: apps
+    namespace: flux-system
+`, testManagedAppName, testNamespace)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ManagedApp")
+
+			By("verifying the ManagedApp exists and has correct spec")
+			verifyManagedAppExists := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "managedapp", testManagedAppName,
+					"-n", testNamespace, "-o", "jsonpath={.metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(testManagedAppName))
+			}
+			Eventually(verifyManagedAppExists).Should(Succeed())
+
+			By("verifying the ManagedApp spec fields")
+			cmd = exec.Command("kubectl", "get", "managedapp", testManagedAppName,
+				"-n", testNamespace, "-o", "jsonpath={.spec.gitPath}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("flux/apps/test-app/helmrelease.yaml"))
+		})
+	})
+
+	// Note: UpgradeRequest controller tests are not included here because the
+	// UpgradeRequest controller requires Git configuration (GIT_BACKEND, GIT_REPO_URL, GIT_TOKEN)
+	// which is not available in the basic e2e test environment.
+	// UpgradeRequest functionality is covered by:
+	// - Unit tests (internal/controller/upgraderequest_controller_test.go)
+	// - Integration tests with Gitea (test/integration/)
+
+	Context("Controller Metrics", func() {
+		It("should report reconcile metrics for ManagedApp controller", func() {
+			By("checking that managedapp controller metrics are present")
+			verifyManagedAppMetrics := func(g Gomega) {
+				metricsOutput, err := getMetricsOutput()
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(metricsOutput).To(ContainSubstring(`controller_runtime_reconcile_total{controller="managedapp"`))
+			}
+			Eventually(verifyManagedAppMetrics, 2*time.Minute).Should(Succeed())
+		})
+
+		// Note: UpgradeRequest controller metrics test is skipped because the controller
+		// requires Git configuration which is not available in the basic e2e test environment.
 	})
 })
 
