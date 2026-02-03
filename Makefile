@@ -61,7 +61,6 @@ vet: ## Run go vet against code.
 COVERAGE_DIR ?= $(shell pwd)/coverage
 COVERAGE_UNIT = $(COVERAGE_DIR)/unit
 COVERAGE_INTEGRATION = $(COVERAGE_DIR)/integration
-COVERAGE_E2E = $(COVERAGE_DIR)/e2e
 COVERAGE_MERGED = $(COVERAGE_DIR)/merged
 
 .PHONY: test-smoke
@@ -94,8 +93,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: test-e2e-up manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	@mkdir -p "$(COVERAGE_E2E)"
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -cover -covermode atomic -args -test.gocoverdir="$(COVERAGE_E2E)"
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 	$(MAKE) test-e2e-down
 
 .PHONY: test-integration
@@ -152,9 +150,9 @@ test-fixtures: test-integration-up ## Run Renovate and capture output as test fi
 .PHONY: coverage-merge
 coverage-merge: ## Merge coverage profiles from all test suites.
 	@mkdir -p "$(COVERAGE_MERGED)"
-	@go tool covdata merge -i="$(COVERAGE_UNIT),$(COVERAGE_INTEGRATION),$(COVERAGE_E2E)" -o="$(COVERAGE_MERGED)" 2>/dev/null || \
-		go tool covdata merge -i="$(COVERAGE_UNIT)" -o="$(COVERAGE_MERGED)" 2>/dev/null || true
-	@go tool covdata textfmt -i="$(COVERAGE_MERGED)" -o=cover.out 2>/dev/null || echo "mode: set" > cover.out
+	@go tool covdata merge -i="$(COVERAGE_UNIT),$(COVERAGE_INTEGRATION)" -o="$(COVERAGE_MERGED)" || \
+		go tool covdata merge -i="$(COVERAGE_UNIT)" -o="$(COVERAGE_MERGED)" || true
+	@go tool covdata textfmt -i="$(COVERAGE_MERGED)" -o=cover.out || echo "mode: set" > cover.out
 	@echo "Merged coverage written to cover.out"
 
 .PHONY: coverage-clean

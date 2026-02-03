@@ -94,16 +94,9 @@ jobs:
           go mod tidy
           make test-e2e
 
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-e2e
-          path: coverage/e2e/
-          retention-days: 1
-
   coverage:
     name: Upload Coverage
-    needs: [smoke, integration, e2e]
+    needs: [smoke, integration]
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code

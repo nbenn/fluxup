@@ -3,6 +3,7 @@ CLAUDE.md
 # Build artifacts
 bin/
 coverage/
+cover.out
 
 # Test infrastructure credentials
 .devcontainer/test-infra/.env
