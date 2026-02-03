@@ -33,4 +33,6 @@ FluxUp supports managing:
 
 - [Getting Started](guides/getting-started.md)
 - [Configuration Guide](guides/configuration.md)
+- [Triggering Upgrades](guides/upgrades.md)
 - [ManagedApp Reference](reference/managedapp.md)
+- [UpgradeRequest Reference](reference/upgraderequest.md)

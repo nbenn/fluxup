@@ -1,5 +1,36 @@
 # fluxup - AI Agent Guide
 
+## FluxUp-Specific Structure
+
+```
+api/v1alpha1/
+  managedapp_types.go       ManagedApp CRD (Phase 1)
+  upgraderequest_types.go   UpgradeRequest CRD (Phase 2)
+
+internal/controller/
+  managedapp_controller.go       Health monitoring
+  updates_controller.go          Renovate ConfigMap processing
+  upgraderequest_controller.go   Upgrade workflow orchestration
+
+internal/renovate/              Renovate output parsing
+internal/git/                   Git backends (Gitea, GitHub, GitLab)
+internal/yaml/                  YAML editing with kyaml
+internal/snapshot/              VolumeSnapshot management
+internal/flux/                  Flux suspend/resume helpers
+
+docs/
+  design/                       Implementation design docs
+  guides/                       User guides (getting-started, configuration, upgrades)
+  reference/                    CRD references (managedapp, upgraderequest)
+```
+
+## Project-Specific Conventions
+
+- **Conditions over Phase fields**: Use `metav1.Condition` for status tracking
+- **Point of no return**: Git commit is the boundary for failure handling
+- **Git configuration**: Via environment variables (GIT_BACKEND, GIT_REPO_URL, GIT_TOKEN)
+- **kyaml for YAML editing**: Same library as Flux image-automation-controller
+
 ## Project Structure
 
 **Single-group layout (default):**

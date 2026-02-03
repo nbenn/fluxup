@@ -82,6 +82,73 @@ spec:
       maxAge: "168h"  # 7 days
 ```
 
+## Git Configuration
+
+To enable upgrades, FluxUp needs access to your Git repository. Configure via environment variables on the controller deployment.
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GIT_BACKEND` | Yes | Git provider: `gitea`, `github`, or `gitlab` |
+| `GIT_REPO_URL` | Yes | Repository URL (e.g., `https://gitea.example.com/org/repo`) |
+| `GIT_BRANCH` | No | Branch to commit to (default: `main`) |
+| `GIT_TOKEN` | Yes | Authentication token with write access |
+
+### Creating the Credentials Secret
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fluxup-git-credentials
+  namespace: fluxup-system
+type: Opaque
+stringData:
+  token: "your-git-token-here"
+```
+
+### Configuring the Controller
+
+Edit the controller deployment to add environment variables:
+
+```yaml
+env:
+  - name: GIT_BACKEND
+    value: "gitea"
+  - name: GIT_REPO_URL
+    value: "https://gitea.example.com/org/flux-config"
+  - name: GIT_BRANCH
+    value: "main"
+  - name: GIT_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: fluxup-git-credentials
+        key: token
+```
+
+Or use `kubectl set env`:
+
+```bash
+kubectl set env -n fluxup-system deployment/fluxup-controller-manager \
+  GIT_BACKEND=gitea \
+  GIT_REPO_URL=https://gitea.example.com/org/flux-config \
+  GIT_BRANCH=main
+
+kubectl set env -n fluxup-system deployment/fluxup-controller-manager \
+  --from=secret/fluxup-git-credentials --prefix=GIT_
+```
+
+### Git Token Permissions
+
+The token needs write access to the repository:
+
+| Provider | Required Scopes |
+|----------|-----------------|
+| Gitea | `repo` (or repository write access) |
+| GitHub | `repo` or `contents:write` |
+| GitLab | `api` or `write_repository` |
+
 ## Controller Configuration
 
 The FluxUp controller can be configured via command-line flags.
@@ -93,3 +160,6 @@ The FluxUp controller can be configured via command-line flags.
 | `--metrics-bind-address` | `0` | Metrics endpoint address |
 | `--health-probe-bind-address` | `:8081` | Health probe endpoint |
 | `--leader-elect` | `false` | Enable leader election |
+| `--git-backend` | | Git provider (can also use `GIT_BACKEND` env var) |
+| `--git-repo-url` | | Repository URL (can also use `GIT_REPO_URL` env var) |
+| `--git-branch` | `main` | Git branch (can also use `GIT_BRANCH` env var) |

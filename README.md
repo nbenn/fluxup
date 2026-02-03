@@ -46,12 +46,30 @@ spec:
     kind: HelmRelease
     name: my-app
     namespace: my-app
+  volumeSnapshots:
+    enabled: true
+    volumeSnapshotClassName: csi-snapclass
+    pvcs:
+      - name: data-my-app-0
+```
+
+### Trigger an Upgrade
+
+```yaml
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: my-app-upgrade
+spec:
+  managedAppRef:
+    name: my-app
 ```
 
 ### Verify
 
 ```bash
 kubectl get managedapps
+kubectl get upgraderequests
 ```
 
 ## Documentation
@@ -60,15 +78,18 @@ Full documentation is available at **[nbenn.github.io/fluxup](https://nbenn.gith
 
 - [Getting Started](https://nbenn.github.io/fluxup/guides/getting-started/)
 - [Configuration Guide](https://nbenn.github.io/fluxup/guides/configuration/)
-- [ManagedApp CRD Reference](https://nbenn.github.io/fluxup/reference/managedapp/)
+- [Triggering Upgrades](https://nbenn.github.io/fluxup/guides/upgrades/)
+- [ManagedApp Reference](https://nbenn.github.io/fluxup/reference/managedapp/)
+- [UpgradeRequest Reference](https://nbenn.github.io/fluxup/reference/upgraderequest/)
 - [Renovate Integration](https://nbenn.github.io/fluxup/guides/renovate/)
 
 ## Design Documentation
 
-For detailed architecture, CRD specifications, and implementation plans, see:
+For architecture and implementation details, see:
 
 - [Architecture & Design](docs/design/architecture.md)
-- [Phase 1 Implementation](docs/design/phase1.md)
+- [Phase 1 Design](docs/design/phase1.md)
+- [Phase 2 Design](docs/design/phase2.md)
 
 ## License
 

@@ -23,7 +23,7 @@ kind: ManagedApp
 | `workloadRef` | WorkloadReference | | Optional workload for health checks |
 | `versionPolicy` | VersionPolicy | | Update policy configuration |
 | `healthCheck` | HealthCheckConfig | | Health check configuration |
-| `volumeSnapshots` | VolumeSnapshotConfig | | Snapshot configuration (Phase 2) |
+| `volumeSnapshots` | VolumeSnapshotConfig | | Pre-upgrade snapshot configuration |
 
 ### ObjectReference
 
@@ -45,6 +45,7 @@ kind: ManagedApp
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `autoUpdate` | string | `none` | One of: `none`, `patch`, `minor`, `major` |
+| `versionPath` | string | | YAML path to version field (defaults to `spec.chart.spec.version` for HelmRelease) |
 
 ### HealthCheckConfig
 
@@ -121,6 +122,36 @@ spec:
     namespace: media
   versionPolicy:
     autoUpdate: patch
+```
+
+### With Volume Snapshots
+
+```yaml
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: gitea
+  namespace: default
+spec:
+  gitPath: "flux/apps/gitea/helmrelease.yaml"
+  kustomizationRef:
+    name: apps
+    namespace: flux-system
+  workloadRef:
+    kind: HelmRelease
+    name: gitea
+    namespace: gitea
+  volumeSnapshots:
+    enabled: true
+    volumeSnapshotClassName: csi-snapclass
+    pvcs:
+      - name: data-gitea-0
+      - name: data-gitea-postgresql-0
+    retentionPolicy:
+      maxCount: 3
+      maxAge: "168h"
+  healthCheck:
+    timeout: "10m"
 ```
 
 ### Minimal Configuration

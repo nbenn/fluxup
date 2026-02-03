@@ -70,7 +70,33 @@ NAME     READY   UPDATE   AGE
 my-app   True    False    5m
 ```
 
-### 3. Configure Renovate (Optional)
+### 3. Configure Git Access (For Upgrades)
+
+To enable upgrades, FluxUp needs write access to your Git repository. Create a secret with your Git token:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fluxup-git-credentials
+  namespace: fluxup-system
+type: Opaque
+stringData:
+  token: "your-git-token-here"
+```
+
+Then configure the controller:
+
+```bash
+kubectl set env -n fluxup-system deployment/fluxup-controller-manager \
+  GIT_BACKEND=gitea \
+  GIT_REPO_URL=https://gitea.example.com/org/flux-config \
+  GIT_BRANCH=main
+```
+
+See [Configuration Guide](configuration.md#git-configuration) for details.
+
+### 4. Configure Renovate (Optional)
 
 To enable automatic update detection, deploy the Renovate CronJob:
 
@@ -80,8 +106,31 @@ kubectl apply -f https://github.com/nbenn/fluxup/releases/latest/download/renova
 
 Then configure the `renovate-env` ConfigMap with your Git repository details.
 
+### 5. Trigger an Upgrade
+
+When an update is available, create an UpgradeRequest:
+
+```yaml
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: my-app-upgrade
+  namespace: default
+spec:
+  managedAppRef:
+    name: my-app
+```
+
+Monitor progress:
+
+```bash
+kubectl get upgraderequests -w
+```
+
 ## Next Steps
 
-- [Configuration Guide](configuration.md) - Learn about all configuration options
+- [Configuration Guide](configuration.md) - Configure Git backend and snapshots
+- [Triggering Upgrades](upgrades.md) - Learn about the upgrade workflow
 - [ManagedApp Reference](../reference/managedapp.md) - Full CRD specification
+- [UpgradeRequest Reference](../reference/upgraderequest.md) - Full CRD specification
 - [Renovate Integration](renovate.md) - Set up automatic update detection
