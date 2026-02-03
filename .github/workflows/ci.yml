@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       gitea:
-        image: gitea/gitea:1.22
+        image: gitea/gitea:1.22-rootless
         ports:
           - 3000:3000
         env:
@@ -82,7 +82,7 @@ jobs:
       - name: Setup Gitea
         run: |
           # Create admin user
-          docker exec $(docker ps -q -f ancestor=gitea/gitea:1.22) \
+          docker exec $(docker ps -q -f ancestor=gitea/gitea:1.22-rootless) \
             gitea admin user create --admin --username testadmin --password testpassword123 --email admin@test.local --must-change-password=false
 
           # Create API token
