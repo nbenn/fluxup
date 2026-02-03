@@ -459,6 +459,8 @@ func TestManager_ApplyRetentionPolicy_KeepsNewest(t *testing.T) {
 }
 
 // makeSnapshot creates a VolumeSnapshot for testing
+//
+//nolint:unparam // namespace is always "default" in tests but kept for flexibility
 func makeSnapshot(name, namespace, appName, pvcName, timestamp string) snapshotv1.VolumeSnapshot {
 	ts, _ := time.Parse(time.RFC3339, timestamp)
 	return snapshotv1.VolumeSnapshot{

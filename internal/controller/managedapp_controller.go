@@ -154,7 +154,7 @@ func (r *ManagedAppReconciler) checkKustomizationHealth(ctx context.Context, app
 	ref := app.Spec.KustomizationRef
 	ns := ref.Namespace
 	if ns == "" {
-		ns = "flux-system"
+		ns = DefaultFluxNamespace
 	}
 	key := types.NamespacedName{Name: ref.Name, Namespace: ns}
 

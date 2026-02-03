@@ -143,7 +143,7 @@ func (m *Manager) CreateSnapshotsForUpgrade(
 	snapshotClass string,
 ) ([]SnapshotInfo, error) {
 	timestamp := time.Now().Format("20060102-150405")
-	var snapshots []SnapshotInfo
+	snapshots := make([]SnapshotInfo, 0, len(pvcs))
 
 	for _, pvc := range pvcs {
 		ns := pvc.Namespace

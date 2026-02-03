@@ -46,7 +46,15 @@ Control how updates are handled:
 spec:
   versionPolicy:
     autoUpdate: none  # none, patch, minor, or major
+    versionPath: "spec.chart.spec.version"  # YAML path to version field
 ```
+
+| Field | Description |
+|-------|-------------|
+| `autoUpdate` | Auto-update policy: `none`, `patch`, `minor`, or `major` |
+| `versionPath` | YAML path to the version field (see below) |
+
+**Auto-update values:**
 
 | Value | Description |
 |-------|-------------|
@@ -54,6 +62,30 @@ spec:
 | `patch` | Auto-apply patch updates (1.0.0 → 1.0.1) |
 | `minor` | Auto-apply minor updates (1.0.0 → 1.1.0) |
 | `major` | Auto-apply all updates (1.0.0 → 2.0.0) |
+
+**Version Path:**
+
+The `versionPath` field specifies where in the YAML manifest the version is located. This works for both Helm chart versions and Docker image tags.
+
+For **HelmRelease chart versions** (default):
+```yaml
+versionPolicy:
+  versionPath: "spec.chart.spec.version"  # This is the default
+```
+
+For **image tags in HelmRelease values**:
+```yaml
+versionPolicy:
+  versionPath: "spec.values.image.tag"
+```
+
+For **Deployment image tags** (requires explicit path):
+```yaml
+versionPolicy:
+  versionPath: "spec.template.spec.containers.0.image"
+```
+
+> **Note:** For image updates, `versionPath` is required. There is no sensible default for image tag locations.
 
 ### Health Check Configuration
 
@@ -106,7 +138,7 @@ metadata:
   namespace: fluxup-system
 type: Opaque
 stringData:
-  token: "your-git-token-here"
+  TOKEN: "your-git-token-here"
 ```
 
 ### Configuring the Controller
@@ -125,7 +157,7 @@ env:
     valueFrom:
       secretKeyRef:
         name: fluxup-git-credentials
-        key: token
+        key: TOKEN
 ```
 
 Or use `kubectl set env`:
@@ -136,6 +168,7 @@ kubectl set env -n fluxup-system deployment/fluxup-controller-manager \
   GIT_REPO_URL=https://gitea.example.com/org/flux-config \
   GIT_BRANCH=main
 
+# The secret key must be uppercase (TOKEN) so --prefix=GIT_ creates GIT_TOKEN
 kubectl set env -n fluxup-system deployment/fluxup-controller-manager \
   --from=secret/fluxup-git-credentials --prefix=GIT_
 ```

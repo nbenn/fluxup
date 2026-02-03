@@ -1852,6 +1852,34 @@ Future options:
 
 ---
 
+## Phase 2 Future Work
+
+Items identified during Phase 2 implementation that are deferred:
+
+### Multi-Image Updates
+Current approach: one version path per ManagedApp. For apps with multiple images, create separate ManagedApps.
+
+Future options:
+- Add `ImagePaths map[string]string` to VersionPolicy mapping image name → YAML path
+- Support atomic updates of multiple images in a single UpgradeRequest
+
+### GitHub/GitLab Backends
+Current approach: Gitea implementation only.
+
+Future options:
+- Implement `github.Manager` using GitHub API
+- Implement `gitlab.Manager` using GitLab API
+- Consider generic git CLI backend for maximum compatibility
+
+### E2E Test Coverage
+Current approach: unit tests with mocks, scaffolded E2E tests.
+
+Future options:
+- Full E2E tests with Kind cluster, real Gitea instance, mock CSI driver
+- Integration tests with Flux reconciliation
+
+---
+
 ## Next Steps After Phase 2
 
 Phase 3 will add:

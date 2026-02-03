@@ -37,6 +37,9 @@ import (
 	yamlpkg "github.com/nbenn/fluxup/internal/yaml"
 )
 
+// DefaultFluxNamespace is the default namespace for Flux resources.
+const DefaultFluxNamespace = "flux-system"
+
 // UpgradeRequestReconciler reconciles an UpgradeRequest
 type UpgradeRequestReconciler struct {
 	client.Client
@@ -180,7 +183,7 @@ func (r *UpgradeRequestReconciler) handleSuspend(ctx context.Context, upgrade *f
 	ksRef := app.Spec.KustomizationRef
 	ksNS := ksRef.Namespace
 	if ksNS == "" {
-		ksNS = "flux-system"
+		ksNS = DefaultFluxNamespace
 	}
 
 	if err := r.FluxHelper.SuspendKustomization(ctx, ksRef.Name, ksNS); err != nil {
@@ -306,10 +309,34 @@ func (r *UpgradeRequestReconciler) handleCommitting(ctx context.Context, upgrade
 		targetVersion = app.Status.AvailableUpdate
 	}
 
-	// Determine version path
+	// Determine version path and new version value
 	versionPath := yamlpkg.DefaultHelmReleaseVersionPath
 	if app.Spec.VersionPolicy != nil && app.Spec.VersionPolicy.VersionPath != "" {
 		versionPath = app.Spec.VersionPolicy.VersionPath
+	}
+
+	// Determine the new version string based on update type (chart or image)
+	var newVersionStr string
+	var currentVersionStr string
+	if targetVersion.Chart != "" {
+		newVersionStr = targetVersion.Chart
+		if app.Status.CurrentVersion != nil {
+			currentVersionStr = app.Status.CurrentVersion.Chart
+		}
+	} else if len(targetVersion.Images) > 0 {
+		// For image updates, use the first image's tag
+		// VersionPath must be configured to point to the image tag field
+		newVersionStr = targetVersion.Images[0].Tag
+		if app.Status.CurrentVersion != nil && len(app.Status.CurrentVersion.Images) > 0 {
+			currentVersionStr = app.Status.CurrentVersion.Images[0].Tag
+		}
+		// Require explicit VersionPath for image updates (no sensible default)
+		if app.Spec.VersionPolicy == nil || app.Spec.VersionPolicy.VersionPath == "" {
+			return r.setFailed(ctx, upgrade, "MissingVersionPath",
+				"VersionPath must be specified in ManagedApp.spec.versionPolicy for image updates")
+		}
+	} else {
+		return r.setFailed(ctx, upgrade, "InvalidTargetVersion", "No chart version or images specified")
 	}
 
 	// Read current file from Git
@@ -319,15 +346,7 @@ func (r *UpgradeRequestReconciler) handleCommitting(ctx context.Context, upgrade
 	}
 
 	// Update version in YAML
-	var newContent []byte
-	if targetVersion.Chart != "" {
-		newContent, err = r.YAMLEditor.UpdateVersion(content, versionPath, targetVersion.Chart)
-	} else if len(targetVersion.Images) > 0 {
-		// TODO: Handle image updates - need path from ManagedApp spec
-		return r.setFailed(ctx, upgrade, "NotImplemented", "Image updates not yet implemented")
-	} else {
-		return r.setFailed(ctx, upgrade, "InvalidTargetVersion", "No chart version or images specified")
-	}
+	newContent, err := r.YAMLEditor.UpdateVersion(content, versionPath, newVersionStr)
 	if err != nil {
 		return r.setFailed(ctx, upgrade, "YAMLUpdateFailed", err.Error())
 	}
@@ -340,12 +359,7 @@ func (r *UpgradeRequestReconciler) handleCommitting(ctx context.Context, upgrade
 		}
 	}
 
-	currentVersion := ""
-	if app.Status.CurrentVersion != nil {
-		currentVersion = app.Status.CurrentVersion.Chart
-	}
-
-	message := git.FormatCommitMessage(app.Name, currentVersion, targetVersion.Chart, snapshotNames)
+	message := git.FormatCommitMessage(app.Name, currentVersionStr, newVersionStr, snapshotNames)
 
 	// Commit to Git
 	commitInfo, err := r.GitManager.CommitFile(ctx, git.FileChange{
@@ -358,7 +372,7 @@ func (r *UpgradeRequestReconciler) handleCommitting(ctx context.Context, upgrade
 
 	logger.Info("Committed version change to Git",
 		"commit", commitInfo.SHA,
-		"newVersion", targetVersion.Chart)
+		"newVersion", newVersionStr)
 
 	// Update status
 	now := metav1.Now()
@@ -397,7 +411,7 @@ func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrad
 	ksRef := app.Spec.KustomizationRef
 	ksNS := ksRef.Namespace
 	if ksNS == "" {
-		ksNS = "flux-system"
+		ksNS = DefaultFluxNamespace
 	}
 
 	if err := r.FluxHelper.ResumeKustomization(ctx, ksRef.Name, ksNS); err != nil {
@@ -614,7 +628,7 @@ func (r *UpgradeRequestReconciler) setFailed(ctx context.Context, upgrade *fluxu
 				ksRef := app.Spec.KustomizationRef
 				ksNS := ksRef.Namespace
 				if ksNS == "" {
-					ksNS = "flux-system"
+					ksNS = DefaultFluxNamespace
 				}
 				if resumeErr := r.FluxHelper.ResumeKustomization(ctx, ksRef.Name, ksNS); resumeErr != nil {
 					logger.Error(resumeErr, "Failed to resume Kustomization after failure")

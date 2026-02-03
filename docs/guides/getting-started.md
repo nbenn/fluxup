@@ -82,7 +82,7 @@ metadata:
   namespace: fluxup-system
 type: Opaque
 stringData:
-  token: "your-git-token-here"
+  TOKEN: "your-git-token-here"
 ```
 
 Then configure the controller:
@@ -92,6 +92,9 @@ kubectl set env -n fluxup-system deployment/fluxup-controller-manager \
   GIT_BACKEND=gitea \
   GIT_REPO_URL=https://gitea.example.com/org/flux-config \
   GIT_BRANCH=main
+
+kubectl set env -n fluxup-system deployment/fluxup-controller-manager \
+  --from=secret/fluxup-git-credentials --prefix=GIT_
 ```
 
 See [Configuration Guide](configuration.md#git-configuration) for details.

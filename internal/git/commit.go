@@ -35,7 +35,7 @@ func FormatCommitMessage(appName, fromVersion, toVersion string, snapshots []str
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\nManaged-By: fluxup\n"))
+	sb.WriteString("\nManaged-By: fluxup\n")
 	if fromVersion != "" {
 		sb.WriteString(fmt.Sprintf("Previous-Version: %s\n", fromVersion))
 	}

@@ -2,7 +2,7 @@ CLAUDE.md
 
 # Build artifacts
 bin/
-cover.out
+cover*.out
 web/
 
 # Docs build dependencies

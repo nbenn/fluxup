@@ -37,7 +37,7 @@ import (
 	yamlpkg "github.com/nbenn/fluxup/internal/yaml"
 )
 
-func setupTestReconciler(t *testing.T, objects ...client.Object) (*UpgradeRequestReconciler, *git.MockManager) {
+func setupTestReconciler(_ *testing.T, objects ...client.Object) (*UpgradeRequestReconciler, *git.MockManager) {
 	scheme := runtime.NewScheme()
 	_ = fluxupv1alpha1.AddToScheme(scheme)
 	_ = kustomizev1.AddToScheme(scheme)
@@ -299,7 +299,7 @@ func TestUpgradeRequest_SuspendKustomization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !result.Requeue {
+	if !result.Requeue { //nolint:staticcheck // Requeue is the correct field for this reconciler
 		t.Error("expected requeue after suspend")
 	}
 
@@ -428,4 +428,202 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestUpgradeRequest_ImageUpdate(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+			VersionPolicy: &fluxupv1alpha1.VersionPolicy{
+				VersionPath: "spec.values.image.tag",
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion: &fluxupv1alpha1.VersionInfo{
+				Images: []fluxupv1alpha1.ImageInfo{{Name: "myapp", Tag: "v1.0.0"}},
+			},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{
+				Images: []fluxupv1alpha1.ImageInfo{{Name: "myapp", Tag: "v2.0.0"}},
+			},
+		},
+	}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+	}
+
+	r, mockGit := setupTestReconciler(t, kustomization, managedApp, upgrade)
+
+	// Set up mock Git with a HelmRelease that has image values
+	mockGit.SetFile("flux/apps/test-app/helmrelease.yaml", []byte(`apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: test-app
+spec:
+  values:
+    image:
+      repository: myapp
+      tag: "v1.0.0"
+`))
+
+	ctx := context.Background()
+
+	// First reconcile - suspend
+	_, _ = r.Reconcile(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	})
+
+	// Second reconcile - commit
+	_, err := r.Reconcile(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Check Git was committed
+	if len(mockGit.CommitFileCalls) != 1 {
+		t.Fatalf("expected 1 commit call, got %d", len(mockGit.CommitFileCalls))
+	}
+
+	// Verify new image tag in committed content
+	content := string(mockGit.CommitFileCalls[0].Content)
+	if !contains(content, "tag: \"v2.0.0\"") {
+		t.Errorf("expected new image tag in commit, got: %s", content)
+	}
+
+	// Check status
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	gitCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeGitCommitted)
+	if gitCond == nil {
+		t.Fatal("expected GitCommitted condition to be set")
+	}
+	if gitCond.Status != metav1.ConditionTrue {
+		t.Errorf("expected GitCommitted=True, got %s", gitCond.Status)
+	}
+}
+
+func TestUpgradeRequest_ImageUpdateMissingVersionPath(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+	}
+
+	// ManagedApp WITHOUT VersionPath configured
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+			// No VersionPolicy - should fail for image updates
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion: &fluxupv1alpha1.VersionInfo{
+				Images: []fluxupv1alpha1.ImageInfo{{Name: "myapp", Tag: "v1.0.0"}},
+			},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{
+				Images: []fluxupv1alpha1.ImageInfo{{Name: "myapp", Tag: "v2.0.0"}},
+			},
+		},
+	}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+	}
+
+	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
+	ctx := context.Background()
+
+	// First reconcile - suspend
+	_, _ = r.Reconcile(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	})
+
+	// Second reconcile - should fail due to missing VersionPath
+	_, err := r.Reconcile(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Check status - should be failed
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "MissingVersionPath" {
+		t.Errorf("expected reason MissingVersionPath, got %s", completeCond.Reason)
+	}
 }

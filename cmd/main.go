@@ -98,8 +98,10 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 
 	// Git configuration flags
-	flag.StringVar(&gitBackend, "git-backend", "", "Git backend type (gitea, github, gitlab). Can also be set via GIT_BACKEND env var.")
-	flag.StringVar(&gitRepoURL, "git-repo-url", "", "Git repository URL. Can also be set via GIT_REPO_URL env var.")
+	flag.StringVar(&gitBackend, "git-backend", "",
+		"Git backend type (gitea, github, gitlab). Can also be set via GIT_BACKEND env var.")
+	flag.StringVar(&gitRepoURL, "git-repo-url", "",
+		"Git repository URL. Can also be set via GIT_REPO_URL env var.")
 	flag.StringVar(&gitBranch, "git-branch", "main", "Git branch to operate on. Can also be set via GIT_BRANCH env var.")
 	opts := zap.Options{
 		Development: true,
