@@ -109,11 +109,15 @@ spec:
                       type: object
                     type: array
                   retentionPolicy:
-                    description: RetentionPolicy defines how long to keep snapshots
+                    description: RetentionPolicy defines how many snapshots to keep
                     properties:
-                      maxAge:
-                        type: string
                       maxCount:
+                        default: 3
+                        description: |-
+                          MaxCount is the maximum number of snapshots to retain per PVC.
+                          After a successful upgrade, older snapshots beyond this count are pruned.
+                          Defaults to 3 if not specified. Set to 0 to disable retention (keep all).
+                        minimum: 0
                         type: integer
                     type: object
                   volumeSnapshotClassName:

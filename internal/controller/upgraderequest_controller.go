@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -546,6 +547,11 @@ func (r *UpgradeRequestReconciler) handleCompleted(ctx context.Context, upgrade 
 		logger.Error(err, "Failed to update ManagedApp status after upgrade")
 	}
 
+	// Apply snapshot retention policy (prune old snapshots)
+	if app.Spec.VolumeSnapshots != nil && app.Spec.VolumeSnapshots.Enabled {
+		r.applySnapshotRetention(ctx, app, logger)
+	}
+
 	if err := r.Status().Update(ctx, upgrade); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -630,6 +636,25 @@ func (r *UpgradeRequestReconciler) setFailed(ctx context.Context, upgrade *fluxu
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// applySnapshotRetention prunes old snapshots based on the retention policy
+func (r *UpgradeRequestReconciler) applySnapshotRetention(ctx context.Context, app *fluxupv1alpha1.ManagedApp, logger logr.Logger) {
+	// Determine maxCount from retention policy, defaulting to 3
+	maxCount := snapshot.DefaultMaxSnapshotCount
+	if app.Spec.VolumeSnapshots.RetentionPolicy != nil && app.Spec.VolumeSnapshots.RetentionPolicy.MaxCount != nil {
+		maxCount = *app.Spec.VolumeSnapshots.RetentionPolicy.MaxCount
+	}
+
+	deleted, err := r.SnapshotManager.ApplyRetentionPolicy(ctx, app.Name, app.Namespace, maxCount)
+	if err != nil {
+		logger.Error(err, "Failed to apply snapshot retention policy")
+		return
+	}
+
+	if deleted > 0 {
+		logger.Info("Pruned old snapshots", "deleted", deleted, "maxCount", maxCount)
+	}
 }
 
 // updateManagedAppAfterUpgrade updates the ManagedApp status after successful upgrade

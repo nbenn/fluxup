@@ -78,9 +78,10 @@ spec:
       - name: data
         namespace: my-app
     retentionPolicy:
-      maxCount: 3
-      maxAge: "168h"  # 7 days
+      maxCount: 3  # Keep 3 snapshots per PVC (default)
 ```
+
+The retention policy uses a generational approach: after each successful upgrade, snapshots beyond `maxCount` are pruned (oldest first). Set `maxCount: 0` to disable pruning and keep all snapshots.
 
 ## Git Configuration
 

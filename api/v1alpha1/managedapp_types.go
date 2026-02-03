@@ -90,10 +90,15 @@ type PVCRef struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// RetentionPolicy defines how long to keep snapshots
+// RetentionPolicy defines how many snapshots to keep
 type RetentionPolicy struct {
-	MaxCount *int   `json:"maxCount,omitempty"`
-	MaxAge   string `json:"maxAge,omitempty"`
+	// MaxCount is the maximum number of snapshots to retain per PVC.
+	// After a successful upgrade, older snapshots beyond this count are pruned.
+	// Defaults to 3 if not specified. Set to 0 to disable retention (keep all).
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxCount *int `json:"maxCount,omitempty"`
 }
 
 // VersionPolicy defines which updates to allow

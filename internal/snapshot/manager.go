@@ -189,3 +189,72 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, name, namespace string) er
 	}
 	return m.client.Delete(ctx, snapshot)
 }
+
+// DefaultMaxSnapshotCount is the default number of snapshots to retain per PVC
+const DefaultMaxSnapshotCount = 3
+
+// ApplyRetentionPolicy prunes old snapshots for a ManagedApp based on the retention policy.
+// It keeps only the newest maxCount snapshots per PVC, deleting older ones.
+// If maxCount is 0, no snapshots are deleted (retention disabled).
+func (m *Manager) ApplyRetentionPolicy(ctx context.Context, appName, namespace string, maxCount int) (int, error) {
+	if maxCount == 0 {
+		// Retention disabled - keep all snapshots
+		return 0, nil
+	}
+
+	// List all snapshots for this app
+	var snapshots snapshotv1.VolumeSnapshotList
+	if err := m.client.List(ctx, &snapshots,
+		client.InNamespace(namespace),
+		client.MatchingLabels{"fluxup.dev/managed-app": appName},
+	); err != nil {
+		return 0, fmt.Errorf("listing snapshots: %w", err)
+	}
+
+	if len(snapshots.Items) == 0 {
+		return 0, nil
+	}
+
+	// Group snapshots by PVC name
+	byPVC := make(map[string][]snapshotv1.VolumeSnapshot)
+	for _, snap := range snapshots.Items {
+		if snap.Spec.Source.PersistentVolumeClaimName == nil {
+			continue
+		}
+		pvcName := *snap.Spec.Source.PersistentVolumeClaimName
+		byPVC[pvcName] = append(byPVC[pvcName], snap)
+	}
+
+	// For each PVC, sort by creation time and delete oldest beyond maxCount
+	deleted := 0
+	for _, pvcSnapshots := range byPVC {
+		if len(pvcSnapshots) <= maxCount {
+			continue
+		}
+
+		// Sort by creation time (newest first)
+		sortSnapshotsByCreationTime(pvcSnapshots)
+
+		// Delete snapshots beyond maxCount
+		for _, snap := range pvcSnapshots[maxCount:] {
+			if err := m.client.Delete(ctx, &snap); err != nil {
+				// Log but continue - best effort cleanup
+				continue
+			}
+			deleted++
+		}
+	}
+
+	return deleted, nil
+}
+
+// sortSnapshotsByCreationTime sorts snapshots by creation timestamp, newest first
+func sortSnapshotsByCreationTime(snapshots []snapshotv1.VolumeSnapshot) {
+	for i := 0; i < len(snapshots)-1; i++ {
+		for j := i + 1; j < len(snapshots); j++ {
+			if snapshots[j].CreationTimestamp.After(snapshots[i].CreationTimestamp.Time) {
+				snapshots[i], snapshots[j] = snapshots[j], snapshots[i]
+			}
+		}
+	}
+}

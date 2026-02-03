@@ -19,6 +19,7 @@ package snapshot
 import (
 	"context"
 	"testing"
+	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -282,4 +283,197 @@ func TestManager_DeleteSnapshot(t *testing.T) {
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+func stringPtr(s string) *string {
+	return &s
+}
+
+func TestManager_ApplyRetentionPolicy(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = snapshotv1.AddToScheme(scheme)
+
+	tests := []struct {
+		name            string
+		snapshots       []snapshotv1.VolumeSnapshot
+		maxCount        int
+		expectedDeleted int
+		expectedRemain  int
+	}{
+		{
+			name:            "no snapshots",
+			snapshots:       nil,
+			maxCount:        3,
+			expectedDeleted: 0,
+			expectedRemain:  0,
+		},
+		{
+			name: "under limit",
+			snapshots: []snapshotv1.VolumeSnapshot{
+				makeSnapshot("snap-1", "default", "my-app", "pvc-1", "2026-01-01T10:00:00Z"),
+				makeSnapshot("snap-2", "default", "my-app", "pvc-1", "2026-01-02T10:00:00Z"),
+			},
+			maxCount:        3,
+			expectedDeleted: 0,
+			expectedRemain:  2,
+		},
+		{
+			name: "at limit",
+			snapshots: []snapshotv1.VolumeSnapshot{
+				makeSnapshot("snap-1", "default", "my-app", "pvc-1", "2026-01-01T10:00:00Z"),
+				makeSnapshot("snap-2", "default", "my-app", "pvc-1", "2026-01-02T10:00:00Z"),
+				makeSnapshot("snap-3", "default", "my-app", "pvc-1", "2026-01-03T10:00:00Z"),
+			},
+			maxCount:        3,
+			expectedDeleted: 0,
+			expectedRemain:  3,
+		},
+		{
+			name: "over limit - delete oldest",
+			snapshots: []snapshotv1.VolumeSnapshot{
+				makeSnapshot("snap-1", "default", "my-app", "pvc-1", "2026-01-01T10:00:00Z"),
+				makeSnapshot("snap-2", "default", "my-app", "pvc-1", "2026-01-02T10:00:00Z"),
+				makeSnapshot("snap-3", "default", "my-app", "pvc-1", "2026-01-03T10:00:00Z"),
+				makeSnapshot("snap-4", "default", "my-app", "pvc-1", "2026-01-04T10:00:00Z"),
+				makeSnapshot("snap-5", "default", "my-app", "pvc-1", "2026-01-05T10:00:00Z"),
+			},
+			maxCount:        3,
+			expectedDeleted: 2,
+			expectedRemain:  3,
+		},
+		{
+			name: "multiple PVCs - separate limits",
+			snapshots: []snapshotv1.VolumeSnapshot{
+				makeSnapshot("snap-pvc1-1", "default", "my-app", "pvc-1", "2026-01-01T10:00:00Z"),
+				makeSnapshot("snap-pvc1-2", "default", "my-app", "pvc-1", "2026-01-02T10:00:00Z"),
+				makeSnapshot("snap-pvc1-3", "default", "my-app", "pvc-1", "2026-01-03T10:00:00Z"),
+				makeSnapshot("snap-pvc1-4", "default", "my-app", "pvc-1", "2026-01-04T10:00:00Z"),
+				makeSnapshot("snap-pvc2-1", "default", "my-app", "pvc-2", "2026-01-01T10:00:00Z"),
+				makeSnapshot("snap-pvc2-2", "default", "my-app", "pvc-2", "2026-01-02T10:00:00Z"),
+			},
+			maxCount:        2,
+			expectedDeleted: 2, // 2 from pvc-1, 0 from pvc-2
+			expectedRemain:  4,
+		},
+		{
+			name: "maxCount 0 - keep all",
+			snapshots: []snapshotv1.VolumeSnapshot{
+				makeSnapshot("snap-1", "default", "my-app", "pvc-1", "2026-01-01T10:00:00Z"),
+				makeSnapshot("snap-2", "default", "my-app", "pvc-1", "2026-01-02T10:00:00Z"),
+				makeSnapshot("snap-3", "default", "my-app", "pvc-1", "2026-01-03T10:00:00Z"),
+				makeSnapshot("snap-4", "default", "my-app", "pvc-1", "2026-01-04T10:00:00Z"),
+			},
+			maxCount:        0,
+			expectedDeleted: 0,
+			expectedRemain:  4,
+		},
+		{
+			name: "maxCount 1 - keep only newest",
+			snapshots: []snapshotv1.VolumeSnapshot{
+				makeSnapshot("snap-1", "default", "my-app", "pvc-1", "2026-01-01T10:00:00Z"),
+				makeSnapshot("snap-2", "default", "my-app", "pvc-1", "2026-01-02T10:00:00Z"),
+				makeSnapshot("snap-3", "default", "my-app", "pvc-1", "2026-01-03T10:00:00Z"),
+			},
+			maxCount:        1,
+			expectedDeleted: 2,
+			expectedRemain:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientBuilder := fake.NewClientBuilder().WithScheme(scheme)
+			for i := range tt.snapshots {
+				clientBuilder = clientBuilder.WithObjects(&tt.snapshots[i])
+			}
+			client := clientBuilder.Build()
+
+			manager := NewManager(client)
+			ctx := context.Background()
+
+			deleted, err := manager.ApplyRetentionPolicy(ctx, "my-app", "default", tt.maxCount)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if deleted != tt.expectedDeleted {
+				t.Errorf("expected %d deleted, got %d", tt.expectedDeleted, deleted)
+			}
+
+			// Count remaining snapshots
+			var remaining snapshotv1.VolumeSnapshotList
+			if err := client.List(ctx, &remaining); err != nil {
+				t.Fatalf("failed to list snapshots: %v", err)
+			}
+
+			if len(remaining.Items) != tt.expectedRemain {
+				t.Errorf("expected %d remaining, got %d", tt.expectedRemain, len(remaining.Items))
+			}
+		})
+	}
+}
+
+func TestManager_ApplyRetentionPolicy_KeepsNewest(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = snapshotv1.AddToScheme(scheme)
+
+	// Create snapshots with specific timestamps - oldest first in creation order
+	snapshots := []snapshotv1.VolumeSnapshot{
+		makeSnapshot("oldest", "default", "my-app", "pvc-1", "2026-01-01T10:00:00Z"),
+		makeSnapshot("middle", "default", "my-app", "pvc-1", "2026-01-02T10:00:00Z"),
+		makeSnapshot("newest", "default", "my-app", "pvc-1", "2026-01-03T10:00:00Z"),
+	}
+
+	clientBuilder := fake.NewClientBuilder().WithScheme(scheme)
+	for i := range snapshots {
+		clientBuilder = clientBuilder.WithObjects(&snapshots[i])
+	}
+	client := clientBuilder.Build()
+
+	manager := NewManager(client)
+	ctx := context.Background()
+
+	// Keep only 1 - should keep "newest"
+	deleted, err := manager.ApplyRetentionPolicy(ctx, "my-app", "default", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if deleted != 2 {
+		t.Errorf("expected 2 deleted, got %d", deleted)
+	}
+
+	// Verify "newest" remains
+	var remaining snapshotv1.VolumeSnapshotList
+	if err := client.List(ctx, &remaining); err != nil {
+		t.Fatalf("failed to list snapshots: %v", err)
+	}
+
+	if len(remaining.Items) != 1 {
+		t.Fatalf("expected 1 remaining, got %d", len(remaining.Items))
+	}
+
+	if remaining.Items[0].Name != "newest" {
+		t.Errorf("expected 'newest' to remain, got %s", remaining.Items[0].Name)
+	}
+}
+
+// makeSnapshot creates a VolumeSnapshot for testing
+func makeSnapshot(name, namespace, appName, pvcName, timestamp string) snapshotv1.VolumeSnapshot {
+	ts, _ := time.Parse(time.RFC3339, timestamp)
+	return snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         namespace,
+			CreationTimestamp: metav1.Time{Time: ts},
+			Labels: map[string]string{
+				"fluxup.dev/managed-app": appName,
+			},
+		},
+		Spec: snapshotv1.VolumeSnapshotSpec{
+			Source: snapshotv1.VolumeSnapshotSource{
+				PersistentVolumeClaimName: stringPtr(pvcName),
+			},
+		},
+	}
 }
