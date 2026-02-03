@@ -2,20 +2,7 @@ CLAUDE.md
 
 # Build artifacts
 bin/
-cover*.out
-web/
-
-# Docs build dependencies
-docs/node_modules/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS
-.DS_Store
+coverage/
 
 # Test infrastructure credentials
 .devcontainer/test-infra/.env

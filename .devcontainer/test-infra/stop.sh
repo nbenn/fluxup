@@ -3,6 +3,9 @@ set -euo pipefail
 
 # Stop Gitea test instance
 # Usage: ./stop.sh
+#
+# Only stops the local container if one was started.
+# Does nothing if using an external Gitea (e.g., CI service).
 
 GITEA_CONTAINER="fluxup-gitea-test"
 
@@ -13,7 +16,7 @@ if docker ps --format '{{.Names}}' | grep -q "^${GITEA_CONTAINER}$"; then
     docker rm "${GITEA_CONTAINER}"
     echo "Gitea stopped and removed."
 else
-    echo "Gitea container not running."
+    echo "No local Gitea container running (may be using external instance)."
 fi
 
 # Clean up env file

@@ -57,9 +57,17 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+# Coverage directories for binary format
+COVERAGE_DIR ?= $(shell pwd)/coverage
+COVERAGE_UNIT = $(COVERAGE_DIR)/unit
+COVERAGE_INTEGRATION = $(COVERAGE_DIR)/integration
+COVERAGE_E2E = $(COVERAGE_DIR)/e2e
+COVERAGE_MERGED = $(COVERAGE_DIR)/merged
+
 .PHONY: test-smoke
 test-smoke: manifests generate fmt vet setup-envtest ## Run smoke tests (unit tests) with coverage.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover-smoke.out
+	@mkdir -p "$(COVERAGE_UNIT)"
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -cover -covermode atomic -args -test.gocoverdir="$(COVERAGE_UNIT)"
 
 .PHONY: test
 test: test-smoke ## Alias for test-smoke.
@@ -86,12 +94,14 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: test-e2e-up manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -coverprofile cover-e2e.out -coverpkg=./...
+	@mkdir -p "$(COVERAGE_E2E)"
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -cover -covermode atomic -args -test.gocoverdir="$(COVERAGE_E2E)"
 	$(MAKE) test-e2e-down
 
 .PHONY: test-integration
 test-integration: test-integration-up ## Run integration tests with coverage
-	@bash -c 'set -a && source .devcontainer/test-infra/.env && set +a && go test -tags=integration -v ./internal/git/... -coverprofile cover-integration.out -coverpkg=./...'
+	@mkdir -p "$(COVERAGE_INTEGRATION)"
+	@bash -c 'set -a && source .devcontainer/test-infra/.env && set +a && go test -tags=integration -v ./internal/git/... -cover -covermode atomic -args -test.gocoverdir="$(COVERAGE_INTEGRATION)"'
 	$(MAKE) test-integration-down
 
 ##@ Test Infrastructure
@@ -140,9 +150,16 @@ test-fixtures: test-integration-up ## Run Renovate and capture output as test fi
 	@. .devcontainer/test-infra/.env && .devcontainer/test-infra/run-renovate.sh
 
 .PHONY: coverage-merge
-coverage-merge: gocovmerge ## Merge coverage profiles from all test suites.
-	@"$(GOCOVMERGE)" cover-*.out > cover.out 2>/dev/null || cp cover-smoke.out cover.out
+coverage-merge: ## Merge coverage profiles from all test suites.
+	@mkdir -p "$(COVERAGE_MERGED)"
+	@go tool covdata merge -i="$(COVERAGE_UNIT),$(COVERAGE_INTEGRATION),$(COVERAGE_E2E)" -o="$(COVERAGE_MERGED)" 2>/dev/null || \
+		go tool covdata merge -i="$(COVERAGE_UNIT)" -o="$(COVERAGE_MERGED)" 2>/dev/null || true
+	@go tool covdata textfmt -i="$(COVERAGE_MERGED)" -o=cover.out 2>/dev/null || echo "mode: set" > cover.out
 	@echo "Merged coverage written to cover.out"
+
+.PHONY: coverage-clean
+coverage-clean: ## Remove coverage data directories.
+	@rm -rf "$(COVERAGE_DIR)" cover.out cover-*.out
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -239,12 +256,10 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
-GOCOVMERGE = $(LOCALBIN)/gocovmerge
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.7.1
 CONTROLLER_TOOLS_VERSION ?= v0.20.0
-GOCOVMERGE_VERSION ?= v0.0.0-20230424223518-5f7bfae00a88
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -284,11 +299,6 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
-
-.PHONY: gocovmerge
-gocovmerge: $(GOCOVMERGE) ## Download gocovmerge locally if necessary.
-$(GOCOVMERGE): $(LOCALBIN)
-	$(call go-install-tool,$(GOCOVMERGE),github.com/wadey/gocovmerge,$(GOCOVMERGE_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
