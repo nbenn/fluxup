@@ -89,14 +89,23 @@ jobs:
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
-      - name: Run E2E tests
+      - name: Run E2E tests with coverage
         run: |
           go mod tidy
-          make test-e2e
+          make test-e2e-cover
+
+      - name: Upload e2e coverage artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-e2e
+          path: coverage/e2e/
+          retention-days: 1
+          if-no-files-found: ignore
 
   coverage:
     name: Upload Coverage
-    needs: [smoke, integration]
+    needs: [smoke, integration, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code

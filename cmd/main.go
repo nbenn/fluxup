@@ -21,6 +21,9 @@ import (
 	"flag"
 	"log/slog"
 	"os"
+	"os/signal"
+	"runtime/coverage"
+	"syscall"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -53,6 +56,28 @@ var (
 	scheme = runtime.NewScheme()
 )
 
+// setupCoverageSignalHandler sets up a signal handler to write coverage data
+// when SIGUSR1 is received. This enables coverage collection for e2e tests
+// where the binary runs in a container. The coverage data is written to the
+// directory specified by GOCOVERDIR environment variable.
+func setupCoverageSignalHandler() {
+	coverDir, exists := os.LookupEnv("GOCOVERDIR")
+	if !exists {
+		return
+	}
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, syscall.SIGUSR1)
+	go func() {
+		for range c {
+			if err := coverage.WriteCountersDir(coverDir); err != nil {
+				// Log to stderr since logger may not be initialized yet
+				_, _ = os.Stderr.WriteString("coverage: failed to write counters: " + err.Error() + "\n")
+			}
+		}
+	}()
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -65,6 +90,8 @@ func init() {
 
 // nolint:gocyclo
 func main() {
+	// Set up coverage signal handler for e2e tests (no-op if GOCOVERDIR not set)
+	setupCoverageSignalHandler()
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string

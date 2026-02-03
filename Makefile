@@ -61,6 +61,7 @@ vet: ## Run go vet against code.
 COVERAGE_DIR ?= $(shell pwd)/coverage
 COVERAGE_UNIT = $(COVERAGE_DIR)/unit
 COVERAGE_INTEGRATION = $(COVERAGE_DIR)/integration
+COVERAGE_E2E = $(COVERAGE_DIR)/e2e
 COVERAGE_MERGED = $(COVERAGE_DIR)/merged
 
 .PHONY: test-smoke
@@ -95,6 +96,40 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 test-e2e: test-e2e-up manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 	$(MAKE) test-e2e-down
+
+# Coverage image for e2e tests
+IMG_COVER ?= controller:cover
+
+.PHONY: docker-build-cover
+docker-build-cover: ## Build docker image with coverage instrumentation for e2e tests.
+	$(CONTAINER_TOOL) build -t ${IMG_COVER} -f Dockerfile.cover .
+
+.PHONY: test-e2e-cover
+test-e2e-cover: test-e2e-up manifests generate fmt vet docker-build-cover ## Run e2e tests with coverage collection.
+	@mkdir -p "$(COVERAGE_E2E)"
+	@# Load coverage image into Kind
+	$(KIND) load docker-image ${IMG_COVER} --name $(KIND_CLUSTER)
+	@# Set the image in the coverage overlay
+	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG_COVER}
+	@# Run tests using coverage deployment
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) IMG=${IMG_COVER} DEPLOY_COVERAGE=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v || true
+	@# Extract coverage before teardown
+	$(MAKE) test-e2e-extract-coverage
+	$(MAKE) test-e2e-down
+
+.PHONY: test-e2e-extract-coverage
+test-e2e-extract-coverage: ## Extract coverage data from e2e test pod.
+	@mkdir -p "$(COVERAGE_E2E)"
+	@echo "Signaling controller to write coverage data..."
+	@POD=$$($(KUBECTL) get pods -n fluxup-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) && \
+	if [ -n "$$POD" ]; then \
+		$(KUBECTL) exec -n fluxup-system $$POD -- kill -USR1 1 2>/dev/null || true; \
+		sleep 2; \
+		echo "Copying coverage data from pod..."; \
+		$(KUBECTL) cp fluxup-system/$$POD:/coverage "$(COVERAGE_E2E)" 2>/dev/null || echo "No coverage data found"; \
+	else \
+		echo "Controller pod not found, skipping coverage extraction"; \
+	fi
 
 .PHONY: test-integration
 test-integration: test-integration-up ## Run integration tests with coverage
@@ -150,9 +185,19 @@ test-fixtures: test-integration-up ## Run Renovate and capture output as test fi
 .PHONY: coverage-merge
 coverage-merge: ## Merge coverage profiles from all test suites.
 	@mkdir -p "$(COVERAGE_MERGED)"
-	@go tool covdata merge -i="$(COVERAGE_UNIT),$(COVERAGE_INTEGRATION)" -o="$(COVERAGE_MERGED)" || \
-		go tool covdata merge -i="$(COVERAGE_UNIT)" -o="$(COVERAGE_MERGED)" || true
-	@go tool covdata textfmt -i="$(COVERAGE_MERGED)" -o=cover.out || echo "mode: set" > cover.out
+	@# Try to merge all available coverage directories
+	@DIRS=""; \
+	[ -d "$(COVERAGE_UNIT)" ] && [ -n "$$(ls -A $(COVERAGE_UNIT) 2>/dev/null)" ] && DIRS="$$DIRS$(COVERAGE_UNIT),"; \
+	[ -d "$(COVERAGE_INTEGRATION)" ] && [ -n "$$(ls -A $(COVERAGE_INTEGRATION) 2>/dev/null)" ] && DIRS="$$DIRS$(COVERAGE_INTEGRATION),"; \
+	[ -d "$(COVERAGE_E2E)" ] && [ -n "$$(ls -A $(COVERAGE_E2E) 2>/dev/null)" ] && DIRS="$$DIRS$(COVERAGE_E2E),"; \
+	DIRS=$${DIRS%,}; \
+	if [ -n "$$DIRS" ]; then \
+		echo "Merging coverage from: $$DIRS"; \
+		go tool covdata merge -i="$$DIRS" -o="$(COVERAGE_MERGED)"; \
+	else \
+		echo "No coverage data found"; \
+	fi
+	@go tool covdata textfmt -i="$(COVERAGE_MERGED)" -o=cover.out 2>/dev/null || echo "mode: set" > cover.out
 	@echo "Merged coverage written to cover.out"
 
 .PHONY: coverage-clean
@@ -235,6 +280,11 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
+
+.PHONY: deploy-cover
+deploy-cover: manifests kustomize ## Deploy controller with coverage instrumentation to the K8s cluster.
+	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+	"$(KUSTOMIZE)" build config/coverage | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
