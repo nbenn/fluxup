@@ -47,6 +47,64 @@ jobs:
           files: cover.out
           fail_ci_if_error: false
 
+  integration:
+    name: Integration Tests
+    needs: test
+    runs-on: ubuntu-latest
+    services:
+      gitea:
+        image: gitea/gitea:1.22
+        ports:
+          - 3000:3000
+        env:
+          GITEA__security__INSTALL_LOCK: "true"
+          GITEA__server__ROOT_URL: "http://localhost:3000"
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Wait for Gitea
+        run: |
+          for i in {1..30}; do
+            if curl -s http://localhost:3000/api/v1/version; then
+              echo "Gitea is ready"
+              break
+            fi
+            echo "Waiting for Gitea..."
+            sleep 2
+          done
+
+      - name: Setup Gitea
+        run: |
+          # Create admin user
+          docker exec $(docker ps -q -f ancestor=gitea/gitea:1.22) \
+            gitea admin user create --admin --username testadmin --password testpassword123 --email admin@test.local --must-change-password=false
+
+          # Create API token
+          TOKEN=$(curl -s -X POST "http://localhost:3000/api/v1/users/testadmin/tokens" \
+            -u "testadmin:testpassword123" \
+            -H "Content-Type: application/json" \
+            -d '{"name": "ci-token", "scopes": ["write:repository"]}' | jq -r '.sha1')
+          echo "GITEA_TOKEN=$TOKEN" >> $GITHUB_ENV
+
+          # Create test repository
+          curl -s -X POST "http://localhost:3000/api/v1/user/repos" \
+            -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"name": "fluxup-test", "auto_init": true}'
+
+          echo "GITEA_URL=http://localhost:3000" >> $GITHUB_ENV
+          echo "GITEA_OWNER=testadmin" >> $GITHUB_ENV
+          echo "GITEA_REPO=fluxup-test" >> $GITHUB_ENV
+
+      - name: Run integration tests
+        run: go test -tags=integration -v ./internal/git/...
+
   e2e:
     name: E2E Tests
     needs: test
