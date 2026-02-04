@@ -907,7 +907,7 @@ func TestRollbackRequest_ReconcileTimeout(t *testing.T) {
 	if completeCond.Status != metav1.ConditionFalse {
 		t.Errorf("expected Complete=False, got %s", completeCond.Status)
 	}
-	if completeCond.Reason != "ReconciliationTimeout" {
+	if completeCond.Reason != reasonReconciliationTimeout {
 		t.Errorf("expected reason ReconciliationTimeout, got %s", completeCond.Reason)
 	}
 }
@@ -1060,7 +1060,7 @@ func TestRollbackRequest_HealthCheckTimeout(t *testing.T) {
 	}
 	// The actual reason depends on how far the rollback got -
 	// it may fail at reconciliation or health check stage
-	if completeCond.Reason != "HealthCheckTimeout" && completeCond.Reason != "ReconciliationTimeout" {
+	if completeCond.Reason != reasonHealthCheckTimeout && completeCond.Reason != reasonReconciliationTimeout {
 		t.Errorf("expected reason HealthCheckTimeout or ReconciliationTimeout, got %s", completeCond.Reason)
 	}
 }

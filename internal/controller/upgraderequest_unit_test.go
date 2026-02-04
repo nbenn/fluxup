@@ -41,7 +41,11 @@ import (
 	yamlpkg "github.com/nbenn/fluxup/internal/yaml"
 )
 
-const testUpgradeName = "test-upgrade"
+const (
+	testUpgradeName             = "test-upgrade"
+	reasonReconciliationTimeout = "ReconciliationTimeout"
+	reasonHealthCheckTimeout    = "HealthCheckTimeout"
+)
 
 func setupTestReconciler(_ *testing.T, objects ...client.Object) (*UpgradeRequestReconciler, *git.MockManager) {
 	scheme := runtime.NewScheme()
@@ -1658,7 +1662,7 @@ func TestUpgradeRequest_ReconcileTimeout_TriggersAutoRollback(t *testing.T) {
 	if completeCond.Status != metav1.ConditionFalse {
 		t.Errorf("expected Complete=False, got %s", completeCond.Status)
 	}
-	if completeCond.Reason != "ReconciliationTimeout" {
+	if completeCond.Reason != reasonReconciliationTimeout {
 		t.Errorf("expected reason ReconciliationTimeout, got %s", completeCond.Reason)
 	}
 
@@ -1792,7 +1796,7 @@ func TestUpgradeRequest_ReconcileTimeout_NoAutoRollback(t *testing.T) {
 	if completeCond.Status != metav1.ConditionFalse {
 		t.Errorf("expected Complete=False, got %s", completeCond.Status)
 	}
-	if completeCond.Reason != "ReconciliationTimeout" {
+	if completeCond.Reason != reasonReconciliationTimeout {
 		t.Errorf("expected reason ReconciliationTimeout, got %s", completeCond.Reason)
 	}
 

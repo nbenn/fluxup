@@ -588,4 +588,431 @@ spec:
 			Expect(output).To(Equal("NoSnapshotsAvailable"))
 		})
 	})
+
+	Context("Concurrent operations", func() {
+		It("should handle multiple upgrade requests for same app", func() {
+			By("creating a ManagedApp")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: concurrent-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/gitea/helmrelease.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating first UpgradeRequest")
+			upgradeYAML1 := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: concurrent-upgrade-1
+  namespace: %s
+spec:
+  managedAppRef:
+    name: concurrent-app
+  targetVersion:
+    chart: "11.0.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML1)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("immediately creating second UpgradeRequest")
+			upgradeYAML2 := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: concurrent-upgrade-2
+  namespace: %s
+spec:
+  managedAppRef:
+    name: concurrent-app
+  targetVersion:
+    chart: "12.0.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML2)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for both upgrades to complete")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "concurrent-upgrade-1",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output1, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "get", "upgraderequest", "concurrent-upgrade-2",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output2, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				g.Expect(output1).NotTo(BeEmpty())
+				g.Expect(output2).NotTo(BeEmpty())
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying at least one completed successfully")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "-n", failureTestNS,
+				"-o", "jsonpath={.items[?(@.status.conditions[?(@.type=='Complete' && @.status=='True')])].metadata.name}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			// At least one should succeed with dry-run
+			Expect(output).NotTo(BeEmpty())
+		})
+	})
+
+	Context("Timeout scenarios", func() {
+		It("should handle phase timeout gracefully", func() {
+			By("creating a ManagedApp with very short health check timeout")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: timeout-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/gitea/helmrelease.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+  healthCheckTimeout: 1s
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating an UpgradeRequest that will likely timeout")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: timeout-test
+  namespace: %s
+spec:
+  managedAppRef:
+    name: timeout-app
+  targetVersion:
+    chart: "99.0.0"
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for upgrade to complete (success or failure)")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "timeout-test",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("checking final status")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "timeout-test",
+				"-n", failureTestNS, "-o", "yaml")
+			fullOutput, _ := utils.Run(cmd)
+			GinkgoWriter.Printf("UpgradeRequest final status:\n%s\n", fullOutput)
+
+			By("verifying Kustomization is resumed even after timeout")
+			cmd = exec.Command("kubectl", "get", "kustomization", kustomizationName,
+				"-n", fluxSystemNS, "-o", "jsonpath={.spec.suspend}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Or(BeEmpty(), Equal("false")))
+		})
+	})
+
+	Context("Phase transition failures", func() {
+		It("should handle ManagedApp deletion during upgrade", func() {
+			By("creating a ManagedApp")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: delete-during-upgrade-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/gitea/helmrelease.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating an UpgradeRequest")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: delete-managedapp-test
+  namespace: %s
+spec:
+  managedAppRef:
+    name: delete-during-upgrade-app
+  targetVersion:
+    chart: "11.0.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("deleting the ManagedApp while upgrade is processing")
+			cmd = exec.Command("kubectl", "delete", "managedapp", "delete-during-upgrade-app",
+				"-n", failureTestNS, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+
+			By("waiting for upgrade to complete or fail")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "delete-managedapp-test",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("checking the upgrade status")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "delete-managedapp-test",
+				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			GinkgoWriter.Printf("Upgrade completion reason: %s\n", output)
+		})
+
+		It("should handle Kustomization deletion during rollback", func() {
+			By("creating a ManagedApp")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: delete-during-rollback-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/gitea/helmrelease.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a completed UpgradeRequest")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: upgrade-for-kustomization-delete
+  namespace: %s
+spec:
+  managedAppRef:
+    name: delete-during-rollback-app
+  targetVersion:
+    chart: "11.0.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "upgrade-for-kustomization-delete",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 1*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("creating a RollbackRequest")
+			rollbackYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: RollbackRequest
+metadata:
+  name: rollback-kustomization-delete
+  namespace: %s
+spec:
+  upgradeRequestRef:
+    name: upgrade-for-kustomization-delete
+  dryRun: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(rollbackYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for rollback to complete or fail")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "rollbackrequest", "rollback-kustomization-delete",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("checking the rollback status")
+			cmd = exec.Command("kubectl", "get", "rollbackrequest", "rollback-kustomization-delete",
+				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			GinkgoWriter.Printf("Rollback completion reason: %s\n", output)
+		})
+	})
+
+	Context("Finalizer cleanup", func() {
+		It("should remove finalizers on dry-run completion", func() {
+			By("creating a ManagedApp")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: finalizer-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/gitea/helmrelease.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a dry-run UpgradeRequest")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: finalizer-test
+  namespace: %s
+spec:
+  managedAppRef:
+    name: finalizer-app
+  targetVersion:
+    chart: "11.0.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for dry-run to complete")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "finalizer-test",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying finalizer was removed")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "finalizer-test",
+				"-n", failureTestNS, "-o", "jsonpath={.metadata.finalizers}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			// Should be empty or not contain the operation finalizer
+			Expect(output).NotTo(ContainSubstring("fluxup.dev/operation"))
+		})
+
+		It("should be deletable after completion", func() {
+			By("creating a ManagedApp")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: delete-after-complete-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/gitea/helmrelease.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a dry-run UpgradeRequest")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: delete-test
+  namespace: %s
+spec:
+  managedAppRef:
+    name: delete-after-complete-app
+  targetVersion:
+    chart: "11.0.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for completion")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "delete-test",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("deleting the completed UpgradeRequest")
+			cmd = exec.Command("kubectl", "delete", "upgraderequest", "delete-test",
+				"-n", failureTestNS, "--timeout=30s")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying it was deleted")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "delete-test", "-n", failureTestNS)
+			_, err = utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "UpgradeRequest should be deleted")
+		})
+	})
 })

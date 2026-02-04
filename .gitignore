@@ -4,6 +4,7 @@ CLAUDE.md
 bin/
 /coverage/
 cover.out
+coverage.out
 
 # Test infrastructure credentials
 .devcontainer/test-infra/.env
