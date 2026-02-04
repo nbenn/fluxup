@@ -3,6 +3,9 @@ set -euo pipefail
 
 echo "Installing Kubebuilder development tools..."
 
+# Set bash as default shell for root (Zed uses root, not remoteUser)
+chsh -s /bin/bash root 2>/dev/null || true
+
 ARCH=$(go env GOARCH)
 
 # Install kind

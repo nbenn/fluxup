@@ -1,6 +1,14 @@
 {
   "name": "Kubebuilder DevContainer",
-  "image": "golang:1.25",
+  "dockerComposeFile": [
+    "docker-compose.yml",
+    "docker-compose.local.yml"
+  ],
+  "service": "app",
+  "workspaceFolder": "/workspace",
+
+  "initializeCommand": "test -f .devcontainer/docker-compose.local.yml || echo 'services: {}' > .devcontainer/docker-compose.local.yml",
+
   "features": {
     "ghcr.io/devcontainers/features/docker-in-docker:2": {
       "moby": false,
@@ -9,12 +17,10 @@
     "ghcr.io/devcontainers/features/git:1": {}
   },
 
-  "runArgs": ["--privileged", "--init"],
-
   "customizations": {
     "vscode": {
       "settings": {
-        "terminal.integrated.shell.linux": "/bin/bash"
+        "terminal.integrated.defaultProfile.linux": "bash"
       },
       "extensions": [
         "ms-kubernetes-tools.vscode-kubernetes-tools",
@@ -29,4 +35,3 @@
 
   "onCreateCommand": "bash .devcontainer/post-install.sh"
 }
-

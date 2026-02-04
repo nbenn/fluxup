@@ -1,0 +1,9 @@
+services:
+  app:
+    image: golang:1.25
+    privileged: true
+    init: true
+    volumes:
+      - ..:/workspace:cached
+    working_dir: /workspace
+    command: sleep infinity
