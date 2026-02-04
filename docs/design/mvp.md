@@ -164,9 +164,11 @@ Each phase now has independent timeout tracking, preventing slow early phases fr
 
 ### Testing
 
-- [x] Unit tests for PVC discovery
-- [x] E2E test with HelmRelease-based app
-- [ ] E2E test with multi-workload scenario
+- [x] Unit tests for PVC discovery (`internal/discovery/*_test.go`)
+- [x] Unit tests for health checks (`internal/health/check_test.go`)
+- [x] Unit tests cover multi-workload scenarios (multiple Deployments/StatefulSets)
+- [x] E2E test with HelmRelease-based app (basic controller and CRD tests)
+- [ ] Full E2E upgrade workflow test (requires Git + Flux infrastructure)
 - [ ] Manual test on real cluster
 
 ### Documentation
