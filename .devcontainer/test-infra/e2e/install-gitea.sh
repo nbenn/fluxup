@@ -29,13 +29,10 @@ spec:
       labels:
         app: gitea
     spec:
-      securityContext:
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
       containers:
       - name: gitea
-        image: gitea/gitea:latest
+        image: gitea/gitea:1.22
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 3000
           name: http
@@ -52,8 +49,6 @@ spec:
           value: "gitea.${GITEA_NAMESPACE}.svc.cluster.local"
         - name: GITEA__database__DB_TYPE
           value: "sqlite3"
-        - name: GITEA__database__PATH
-          value: "/data/gitea/gitea.db"
         volumeMounts:
         - name: data
           mountPath: /data
@@ -61,8 +56,9 @@ spec:
           httpGet:
             path: /api/v1/version
             port: 3000
-          initialDelaySeconds: 10
-          periodSeconds: 5
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 12
       volumes:
       - name: data
         emptyDir: {}
