@@ -22,8 +22,8 @@ jobs:
         with:
           version: v2.7.2
 
-  smoke:
-    name: Smoke Tests
+  test-unit:
+    name: Unit Tests
     needs: lint
     runs-on: ubuntu-latest
     steps:
@@ -35,10 +35,10 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run smoke tests
+      - name: Run unit tests
         run: |
           go mod tidy
-          make test-smoke
+          make test-unit
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
@@ -47,9 +47,9 @@ jobs:
           path: coverage/unit/
           retention-days: 1
 
-  integration:
-    name: Integration Tests
-    needs: smoke
+  test-git:
+    name: Git Tests
+    needs: test-unit
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -60,19 +60,19 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run integration tests
-        run: make test-integration
+      - name: Run git tests
+        run: make test-git
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-integration
-          path: coverage/integration/
+          name: coverage-git
+          path: coverage/git/
           retention-days: 1
 
-  e2e:
-    name: E2E Tests
-    needs: smoke
+  test-k8s:
+    name: K8s Tests
+    needs: test-unit
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -89,7 +89,44 @@ jobs:
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
-      - name: Run E2E tests with coverage
+      - name: Run k8s tests with coverage
+        run: |
+          go mod tidy
+          make test-k8s-cover
+
+      - name: Upload k8s coverage artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-k8s
+          path: coverage/k8s/
+          retention-days: 1
+          if-no-files-found: ignore
+
+  test-e2e:
+    name: E2E Tests
+    needs: test-unit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Install Flux CLI
+        run: |
+          curl -s https://fluxcd.io/install.sh | sudo bash
+
+      - name: Run e2e tests with coverage
         run: |
           go mod tidy
           make test-e2e-cover
@@ -105,7 +142,7 @@ jobs:
 
   coverage:
     name: Upload Coverage
-    needs: [smoke, integration, e2e]
+    needs: [test-unit, test-git, test-k8s, test-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code

@@ -168,7 +168,9 @@ Each phase now has independent timeout tracking, preventing slow early phases fr
 - [x] Unit tests for health checks (`internal/health/check_test.go`)
 - [x] Unit tests cover multi-workload scenarios (multiple Deployments/StatefulSets)
 - [x] E2E test with HelmRelease-based app (basic controller and CRD tests)
-- [ ] Full E2E upgrade workflow test (requires Git + Flux infrastructure)
+- [x] Full E2E upgrade workflow test (`test/e2e/upgrade_workflow_test.go`)
+  - Requires: `make test-e2e-full` (installs Flux + Gitea in Kind)
+  - Tests: ManagedApp creation, dry-run upgrade, real upgrade with Git commit
 - [ ] Manual test on real cluster
 
 ### Documentation

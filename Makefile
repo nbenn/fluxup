@@ -60,17 +60,18 @@ vet: ## Run go vet against code.
 # Coverage directories for binary format
 COVERAGE_DIR ?= $(shell pwd)/coverage
 COVERAGE_UNIT = $(COVERAGE_DIR)/unit
-COVERAGE_INTEGRATION = $(COVERAGE_DIR)/integration
+COVERAGE_GIT = $(COVERAGE_DIR)/git
+COVERAGE_K8S = $(COVERAGE_DIR)/k8s
 COVERAGE_E2E = $(COVERAGE_DIR)/e2e
 COVERAGE_MERGED = $(COVERAGE_DIR)/merged
 
-.PHONY: test-smoke
-test-smoke: manifests generate fmt vet setup-envtest ## Run smoke tests (unit tests) with coverage.
+.PHONY: test-unit
+test-unit: manifests generate fmt vet setup-envtest ## Run unit tests with coverage.
 	@mkdir -p "$(COVERAGE_UNIT)"
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -cover -covermode atomic -args -test.gocoverdir="$(COVERAGE_UNIT)"
 
 .PHONY: test
-test: test-smoke ## Alias for test-smoke.
+test: test-unit ## Alias for test-unit.
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
@@ -78,24 +79,19 @@ test: test-smoke ## Alias for test-smoke.
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= fluxup-test-e2e
 
-.PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
-	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
-		exit 1; \
-	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
+.PHONY: test-k8s
+test-k8s: test-k8s-up manifests generate fmt vet ## Run Kubernetes-only tests (no Flux/Gitea). Uses Kind.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	$(MAKE) test-k8s-down
 
 .PHONY: test-e2e
-test-e2e: test-e2e-up manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) test-e2e-down
+test-e2e: test-k8s-up test-e2e-setup-infra manifests generate fmt vet ## Run full e2e tests with Flux + Gitea in Kind.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) E2E_FULL=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	$(MAKE) test-k8s-down
+
+.PHONY: test-e2e-setup-infra
+test-e2e-setup-infra: ## Set up Flux + Gitea in Kind cluster for e2e tests.
+	@.devcontainer/test-infra/e2e/setup.sh
 
 # Coverage image for e2e tests
 IMG_COVER ?= controller:cover
@@ -104,9 +100,9 @@ IMG_COVER ?= controller:cover
 docker-build-cover: ## Build docker image with coverage instrumentation for e2e tests.
 	$(CONTAINER_TOOL) build -t ${IMG_COVER} -f Dockerfile.cover .
 
-.PHONY: test-e2e-cover
-test-e2e-cover: test-e2e-up manifests generate fmt vet kustomize docker-build-cover ## Run e2e tests with coverage collection.
-	@mkdir -p "$(COVERAGE_E2E)"
+.PHONY: test-k8s-cover
+test-k8s-cover: test-k8s-up manifests generate fmt vet kustomize docker-build-cover ## Run k8s tests with coverage collection.
+	@mkdir -p "$(COVERAGE_K8S)"
 	@# Load coverage image into Kind
 	$(KIND) load docker-image ${IMG_COVER} --name $(KIND_CLUSTER)
 	@# Set the image in the coverage overlay
@@ -114,12 +110,35 @@ test-e2e-cover: test-e2e-up manifests generate fmt vet kustomize docker-build-co
 	@# Run tests using coverage deployment
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) IMG=${IMG_COVER} DEPLOY_COVERAGE=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v || true
 	@# Extract coverage before teardown
+	$(MAKE) test-k8s-extract-coverage
+	$(MAKE) test-k8s-down
+
+.PHONY: test-k8s-extract-coverage
+test-k8s-extract-coverage: ## Extract coverage data from k8s test pod.
+	@mkdir -p "$(COVERAGE_K8S)"
+	@$(call extract-controller-coverage,$(COVERAGE_K8S))
+
+.PHONY: test-e2e-cover
+test-e2e-cover: test-k8s-up test-e2e-setup-infra manifests generate fmt vet kustomize docker-build-cover ## Run full e2e tests with coverage collection.
+	@mkdir -p "$(COVERAGE_E2E)"
+	@# Load coverage image into Kind
+	$(KIND) load docker-image ${IMG_COVER} --name $(KIND_CLUSTER)
+	@# Set the image in the coverage overlay
+	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG_COVER}
+	@# Run tests using coverage deployment
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) IMG=${IMG_COVER} DEPLOY_COVERAGE=true E2E_FULL=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v || true
+	@# Extract coverage before teardown
 	$(MAKE) test-e2e-extract-coverage
-	$(MAKE) test-e2e-down
+	$(MAKE) test-k8s-down
 
 .PHONY: test-e2e-extract-coverage
-test-e2e-extract-coverage: ## Extract coverage data from e2e test pod and clean up.
+test-e2e-extract-coverage: ## Extract coverage data from e2e test pod.
 	@mkdir -p "$(COVERAGE_E2E)"
+	@$(call extract-controller-coverage,$(COVERAGE_E2E))
+
+# extract-controller-coverage extracts coverage data from the controller pod
+# $1 - target coverage directory
+define extract-controller-coverage
 	@echo "Extracting coverage data from controller pod..."
 	@POD=$$($(KUBECTL) get pods -n fluxup-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true; \
 	if [ -n "$$POD" ]; then \
@@ -132,40 +151,41 @@ test-e2e-extract-coverage: ## Extract coverage data from e2e test pod and clean 
 		echo "Listing coverage files in pod..."; \
 		$(KUBECTL) exec -n fluxup-system $$POD -- ls -la /coverage 2>/dev/null || echo "Could not list /coverage"; \
 		echo "Copying coverage data from pod..."; \
-		$(KUBECTL) cp fluxup-system/$$POD:/coverage/. "$(COVERAGE_E2E)"/ 2>/dev/null && echo "Coverage data copied" || echo "kubectl cp failed"; \
+		$(KUBECTL) cp fluxup-system/$$POD:/coverage/. "$(1)"/ 2>/dev/null && echo "Coverage data copied" || echo "kubectl cp failed"; \
 		echo "Local coverage directory contents:"; \
-		ls -la "$(COVERAGE_E2E)" 2>/dev/null || echo "Local coverage directory empty or missing"; \
+		ls -la "$(1)" 2>/dev/null || echo "Local coverage directory empty or missing"; \
 	else \
 		echo "Controller pod not found, skipping coverage extraction"; \
 	fi
 	@# Clean up resources (normally done by AfterAll, skipped in coverage mode)
-	@echo "Cleaning up e2e test resources..."
+	@echo "Cleaning up test resources..."
 	@$(KUBECTL) delete pod curl-metrics -n fluxup-system --ignore-not-found 2>/dev/null || true
 	@$(MAKE) undeploy ignore-not-found=true 2>/dev/null || true
 	@$(MAKE) uninstall ignore-not-found=true 2>/dev/null || true
 	@$(KUBECTL) delete ns fluxup-system --ignore-not-found 2>/dev/null || true
+endef
 
-.PHONY: test-integration
-test-integration: test-integration-up ## Run integration tests with coverage
-	@mkdir -p "$(COVERAGE_INTEGRATION)"
-	@bash -c 'set -a && source .devcontainer/test-infra/.env && set +a && go test -tags=integration -v ./internal/git/... -cover -covermode atomic -args -test.gocoverdir="$(COVERAGE_INTEGRATION)"'
-	$(MAKE) test-integration-down
+.PHONY: test-git
+test-git: test-git-up ## Run Git integration tests (Gitea) with coverage.
+	@mkdir -p "$(COVERAGE_GIT)"
+	@bash -c 'set -a && source .devcontainer/test-infra/.env && set +a && go test -tags=integration -v ./internal/git/... -cover -covermode atomic -args -test.gocoverdir="$(COVERAGE_GIT)"'
+	$(MAKE) test-git-down
 
 ##@ Test Infrastructure
 
-# Integration test infrastructure (Gitea)
-.PHONY: test-integration-up
-test-integration-up: ## Start Gitea and seed test repository for integration tests
+# Git test infrastructure (Gitea)
+.PHONY: test-git-up
+test-git-up: ## Start Gitea and seed test repository for git tests.
 	@.devcontainer/test-infra/start.sh
 	@.devcontainer/test-infra/seed-repo.sh
 
-.PHONY: test-integration-down
-test-integration-down: ## Stop Gitea test instance
+.PHONY: test-git-down
+test-git-down: ## Stop Gitea test instance.
 	@.devcontainer/test-infra/stop.sh
 
-# E2E test infrastructure (Kind cluster)
-.PHONY: test-e2e-up
-test-e2e-up: ## Create Kind cluster for e2e tests if it does not exist
+# Kubernetes test infrastructure (Kind cluster)
+.PHONY: test-k8s-up
+test-k8s-up: ## Create Kind cluster for k8s/e2e tests if it does not exist.
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -178,22 +198,12 @@ test-e2e-up: ## Create Kind cluster for e2e tests if it does not exist
 			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
 
-.PHONY: test-e2e-down
-test-e2e-down: ## Tear down the Kind cluster used for e2e tests
+.PHONY: test-k8s-down
+test-k8s-down: ## Tear down the Kind cluster used for k8s/e2e tests.
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
-# Legacy aliases for backward compatibility
-.PHONY: test-infra-up
-test-infra-up: test-integration-up ## Alias for test-integration-up (deprecated)
-
-.PHONY: test-infra-down
-test-infra-down: test-integration-down ## Alias for test-integration-down (deprecated)
-
-.PHONY: test-infra-seed
-test-infra-seed: test-integration-up ## Alias for test-integration-up (deprecated)
-
 .PHONY: test-fixtures
-test-fixtures: test-integration-up ## Run Renovate and capture output as test fixtures
+test-fixtures: test-git-up ## Run Renovate and capture output as test fixtures.
 	@. .devcontainer/test-infra/.env && .devcontainer/test-infra/run-renovate.sh
 
 .PHONY: coverage-merge
@@ -202,7 +212,8 @@ coverage-merge: ## Merge coverage profiles from all test suites.
 	@# Try to merge all available coverage directories
 	@DIRS=""; \
 	[ -d "$(COVERAGE_UNIT)" ] && [ -n "$$(ls -A $(COVERAGE_UNIT) 2>/dev/null)" ] && DIRS="$$DIRS$(COVERAGE_UNIT),"; \
-	[ -d "$(COVERAGE_INTEGRATION)" ] && [ -n "$$(ls -A $(COVERAGE_INTEGRATION) 2>/dev/null)" ] && DIRS="$$DIRS$(COVERAGE_INTEGRATION),"; \
+	[ -d "$(COVERAGE_GIT)" ] && [ -n "$$(ls -A $(COVERAGE_GIT) 2>/dev/null)" ] && DIRS="$$DIRS$(COVERAGE_GIT),"; \
+	[ -d "$(COVERAGE_K8S)" ] && [ -n "$$(ls -A $(COVERAGE_K8S) 2>/dev/null)" ] && DIRS="$$DIRS$(COVERAGE_K8S),"; \
 	[ -d "$(COVERAGE_E2E)" ] && [ -n "$$(ls -A $(COVERAGE_E2E) 2>/dev/null)" ] && DIRS="$$DIRS$(COVERAGE_E2E),"; \
 	DIRS=$${DIRS%,}; \
 	if [ -n "$$DIRS" ]; then \

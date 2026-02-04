@@ -100,30 +100,33 @@ To use it, open the project in VS Code with the Dev Containers extension, or use
 
 ```bash
 # Unit tests (fast, no external dependencies)
-make test
+make test-unit   # or just: make test
 
 # Lint
 make lint
 
-# Integration tests (starts Gitea container automatically)
-make test-integration
+# Git integration tests (starts Gitea container automatically)
+make test-git
 
-# E2E tests (creates Kind cluster, deploys controller)
+# Kubernetes tests (creates Kind cluster, deploys controller)
+make test-k8s
+
+# Full E2E tests (Kind + Flux + Gitea)
 make test-e2e
-
 ```
 
 ### Test Infrastructure
 
 The project uses containerized test infrastructure with a consistent `up`/`down` pattern:
 
-| Component | Purpose | Start | Stop |
-|-----------|---------|-------|------|
-| **Gitea** | Git server for integration tests | `make test-integration-up` | `make test-integration-down` |
-| **Kind** | Kubernetes cluster for e2e tests | `make test-e2e-up` | `make test-e2e-down` |
-| **Renovate** | Version detection (runs on-demand) | `make test-fixtures` | N/A |
+| Test | Purpose | Infrastructure |
+|------|---------|----------------|
+| `test-unit` | Unit tests | None |
+| `test-git` | Git integration tests | Gitea container |
+| `test-k8s` | Kubernetes controller tests | Kind cluster |
+| `test-e2e` | Full end-to-end tests | Kind + Flux + Gitea |
 
-Both `make test-integration` and `make test-e2e` automatically start and stop their infrastructure.
+All test commands automatically start and stop their infrastructure.
 
 ### Regenerating Renovate Fixtures
 
