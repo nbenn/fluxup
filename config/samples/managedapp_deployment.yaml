@@ -12,12 +12,10 @@ spec:
     name: apps
     namespace: flux-system
 
-  # Explicit workload reference for health checks
-  workloadRef:
-    kind: Deployment
-    name: bazarr
-    namespace: media
+  # No helmReleaseRef - workloads discovered from Kustomization inventory
 
   # Allow automatic patch updates
   versionPolicy:
     autoUpdate: patch
+    # Required for image updates - specify the path to the image tag
+    versionPath: "spec.template.spec.containers.0.image"

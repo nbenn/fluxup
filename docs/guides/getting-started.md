@@ -50,9 +50,8 @@ spec:
     name: apps
     namespace: flux-system
 
-  # Optional: explicit workload for health checks
-  workloadRef:
-    kind: HelmRelease
+  # Optional: reference HelmRelease for PVC/workload discovery
+  helmReleaseRef:
     name: my-app
     namespace: my-app
 ```

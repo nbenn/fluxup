@@ -42,13 +42,13 @@ spec:
   kustomizationRef:
     name: apps
     namespace: flux-system
-  workloadRef:
-    kind: HelmRelease
+  helmReleaseRef:
     name: my-app
     namespace: my-app
   volumeSnapshots:
     enabled: true
     volumeSnapshotClassName: csi-snapclass
+    # PVCs are auto-discovered, or can be explicit:
     pvcs:
       - name: data-my-app-0
 ```

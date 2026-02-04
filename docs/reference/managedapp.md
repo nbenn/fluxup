@@ -18,10 +18,10 @@ kind: ManagedApp
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `gitPath` | string | ✅ | Path to the manifest in Git |
-| `kustomizationRef` | ObjectReference | ✅ | Reference to the Flux Kustomization |
+| `gitPath` | string | Yes | Path to the manifest in Git |
+| `kustomizationRef` | ObjectReference | Yes | Reference to the Flux Kustomization |
 | `suspendRef` | ObjectReference | | Kustomization to suspend (defaults to `kustomizationRef`). Use for app-of-apps patterns. |
-| `workloadRef` | WorkloadReference | | Optional workload for health checks and scaling |
+| `helmReleaseRef` | ObjectReference | | Reference to HelmRelease for PVC and workload discovery |
 | `versionPolicy` | VersionPolicy | | Update policy configuration |
 | `healthCheck` | HealthCheckConfig | | Health check configuration |
 | `volumeSnapshots` | VolumeSnapshotConfig | | Pre-upgrade snapshot configuration |
@@ -31,16 +31,8 @@ kind: ManagedApp
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | ✅ | Name of the object |
+| `name` | string | Yes | Name of the object |
 | `namespace` | string | | Namespace (defaults vary by context) |
-
-### WorkloadReference
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `kind` | string | ✅ | One of: `Deployment`, `StatefulSet`, `HelmRelease` |
-| `name` | string | ✅ | Name of the workload |
-| `namespace` | string | | Namespace (defaults to ManagedApp's namespace) |
 
 ### VersionPolicy
 
@@ -59,10 +51,24 @@ kind: ManagedApp
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `enabled` | boolean | ✅ | Enable pre-upgrade snapshots |
+| `enabled` | boolean | Yes | Enable pre-upgrade snapshots |
 | `volumeSnapshotClassName` | string | | CSI snapshot class name |
-| `pvcs` | []PVCRef | | PVCs to snapshot |
+| `pvcs` | []PVCRef | | Explicit PVCs to snapshot (auto-discovered if omitted) |
+| `excludePVCs` | []PVCRef | | PVCs to exclude from auto-discovery |
 | `retentionPolicy` | RetentionPolicy | | Snapshot retention settings |
+
+### PVCRef
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Name of the PVC |
+| `namespace` | string | | Namespace (defaults to ManagedApp's namespace) |
+
+### RetentionPolicy
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `maxCount` | int | 3 | Maximum snapshots to keep per PVC. Set to 0 to keep all. |
 
 ## Status
 
@@ -77,8 +83,23 @@ kind: ManagedApp
 
 | Type | Description |
 |------|-------------|
-| `Ready` | Whether the workload is healthy |
+| `Ready` | Whether the application is healthy (Flux reconciled and workloads ready) |
 | `UpdateAvailable` | Whether an update is available |
+
+## PVC and Workload Discovery
+
+FluxUp automatically discovers PVCs and workloads for snapshotting and scaling:
+
+**When `helmReleaseRef` is set:**
+- Discovers PVCs and workloads from the Helm release secret
+- Decodes the Helm manifest to find Deployments/StatefulSets
+- Finds RWO PVCs mounted by those workloads
+
+**When `helmReleaseRef` is not set:**
+- Discovers from the Kustomization's inventory (`.status.inventory.entries`)
+- Finds workloads and their mounted RWO PVCs
+
+You can override auto-discovery with explicit `volumeSnapshots.pvcs` or exclude specific PVCs with `volumeSnapshots.excludePVCs`.
 
 ## Examples
 
@@ -95,8 +116,7 @@ spec:
   kustomizationRef:
     name: apps
     namespace: flux-system
-  workloadRef:
-    kind: HelmRelease
+  helmReleaseRef:
     name: gitea
     namespace: gitea
   versionPolicy:
@@ -118,8 +138,7 @@ spec:
   kustomizationRef:
     name: apps
     namespace: flux-system
-  workloadRef:
-    kind: HelmRelease
+  helmReleaseRef:
     name: bazarr
     namespace: media
   versionPolicy:
@@ -140,13 +159,13 @@ spec:
   kustomizationRef:
     name: apps
     namespace: flux-system
-  workloadRef:
-    kind: HelmRelease
+  helmReleaseRef:
     name: gitea
     namespace: gitea
   volumeSnapshots:
     enabled: true
     volumeSnapshotClassName: csi-snapclass
+    # PVCs are auto-discovered from HelmRelease, but can be explicit:
     pvcs:
       - name: data-gitea-0
       - name: data-gitea-postgresql-0
@@ -176,10 +195,31 @@ spec:
   suspendRef:
     name: root-apps
     namespace: flux-system
-  workloadRef:
-    kind: StatefulSet
+  helmReleaseRef:
     name: my-app
+    namespace: my-app
   autoRollback: true  # Automatically rollback if upgrade fails
+```
+
+### Kustomization-based App (no HelmRelease)
+
+For apps deployed directly via Kustomization without Helm:
+
+```yaml
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: simple-app
+  namespace: default
+spec:
+  gitPath: "flux/apps/simple-app/deployment.yaml"
+  kustomizationRef:
+    name: apps
+    namespace: flux-system
+  # No helmReleaseRef - workloads discovered from Kustomization inventory
+  volumeSnapshots:
+    enabled: true
+    volumeSnapshotClassName: csi-snapclass
 ```
 
 ### Minimal Configuration

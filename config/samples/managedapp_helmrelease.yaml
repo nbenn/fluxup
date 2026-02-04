@@ -12,9 +12,8 @@ spec:
     name: apps
     namespace: flux-system
 
-  # Explicit workload reference for health checks
-  workloadRef:
-    kind: HelmRelease
+  # Reference to HelmRelease for PVC and workload discovery
+  helmReleaseRef:
     name: gitea
     namespace: gitea
 

@@ -13,13 +13,15 @@ FluxUp upgrades follow a safe workflow:
 
 1. Validate the upgrade request and suspend target
 2. Suspend Flux reconciliation
-3. Scale down workload to 0 (if `workloadRef` configured)
+3. Scale down workloads mounting target PVCs (auto-discovered)
 4. Create pre-upgrade volume snapshots (if configured)
 5. Verify still suspended, then commit version change to Git
-6. Resume Flux reconciliation (Flux scales workload back up)
+6. Resume Flux reconciliation (Flux scales workloads back up)
 7. Wait for health checks to pass
 
 **Why scale down before snapshot?** Scaling down ensures application-consistent snapshots. Without this, a database might be captured mid-transaction, leading to corruption if restored.
+
+**Workload discovery:** FluxUp automatically discovers workloads that mount the target PVCs. For HelmRelease-based apps, it parses the Helm manifest. For Kustomization-based apps, it uses the inventory.
 
 ## Creating an Upgrade
 
@@ -138,7 +140,7 @@ FluxUp tracks progress through conditions:
 | Condition | Meaning |
 |-----------|---------|
 | `Suspended` | Flux Kustomization has been paused |
-| `WorkloadStopped` | Workload stopped (or skipped if no `workloadRef`) |
+| `WorkloadStopped` | All workloads mounting target PVCs are scaled to 0 |
 | `SnapshotReady` | Pre-upgrade snapshots are ready |
 | `GitCommitted` | Version change committed to Git |
 | `Reconciled` | Flux has applied the changes |

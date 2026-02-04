@@ -26,17 +26,24 @@ spec:
     namespace: flux-system
 ```
 
-### Workload Reference
+### HelmRelease Reference
 
-For more accurate health checks, specify the workload explicitly:
+For HelmRelease-based applications, specify the HelmRelease for automatic PVC and workload discovery:
 
 ```yaml
 spec:
-  workloadRef:
-    kind: HelmRelease  # or Deployment, StatefulSet
+  helmReleaseRef:
     name: my-app
     namespace: my-app  # optional, defaults to ManagedApp's namespace
 ```
+
+When `helmReleaseRef` is set, FluxUp automatically:
+- Discovers RWO PVCs from the Helm release manifest
+- Discovers workloads (Deployments/StatefulSets) that mount those PVCs
+- Scales down workloads before snapshotting for data consistency
+- Checks workload health after upgrades
+
+If `helmReleaseRef` is not set, FluxUp uses the Kustomization's inventory for discovery.
 
 ### Version Policy
 
@@ -120,9 +127,9 @@ spec:
     name: root-apps
     namespace: flux-system
 
-  workloadRef:
-    kind: StatefulSet
+  helmReleaseRef:
     name: my-app
+    namespace: my-app
 ```
 
 **How FluxUp detects this:**
@@ -155,7 +162,7 @@ spec:
     timeout: "10m"  # default: 5m
 ```
 
-### Volume Snapshots (Phase 2)
+### Volume Snapshots
 
 Configure pre-upgrade snapshots:
 
@@ -164,12 +171,23 @@ spec:
   volumeSnapshots:
     enabled: true
     volumeSnapshotClassName: "csi-snapclass"
+    # PVCs are auto-discovered, but can be explicit:
     pvcs:
       - name: data
         namespace: my-app
+    # Exclude specific PVCs from auto-discovery:
+    excludePVCs:
+      - name: cache-volume  # ephemeral, don't snapshot
     retentionPolicy:
       maxCount: 3  # Keep 3 snapshots per PVC (default)
 ```
+
+**PVC Discovery:**
+- When `helmReleaseRef` is set, PVCs are discovered from the Helm release manifest
+- When not set, PVCs are discovered from the Kustomization's inventory
+- Only ReadWriteOnce (RWO) PVCs are considered (shared volumes don't need scale-down)
+- Use `pvcs` to override auto-discovery with an explicit list
+- Use `excludePVCs` to exclude specific PVCs from auto-discovery
 
 The retention policy uses a generational approach: after each successful upgrade, snapshots beyond `maxCount` are pruned (oldest first). Set `maxCount: 0` to disable pruning and keep all snapshots.
 

@@ -51,10 +51,16 @@ kind: UpgradeRequest
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `workloadKind` | string | Kind of the scaled workload (Deployment, StatefulSet) |
-| `workloadName` | string | Name of the scaled workload |
-| `originalReplicas` | int32 | Original replica count before scale-down |
-| `scaledDownAt` | Time | When scale-down completed |
+| `workloads` | []WorkloadScalingInfo | List of workloads that were scaled down |
+| `scaledDownAt` | Time | When scale-down completed for all workloads |
+
+### WorkloadScalingInfo
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `kind` | string | Kind of the workload (Deployment, StatefulSet) |
+| `name` | string | Name of the workload |
+| `namespace` | string | Namespace of the workload |
 
 ### SnapshotStatus
 
@@ -87,7 +93,7 @@ kind: UpgradeRequest
 | Type | Description |
 |------|-------------|
 | `Suspended` | Flux Kustomization has been suspended |
-| `WorkloadStopped` | Workload has been stopped (reason: `WorkloadStopped` or `Skipped` if no workloadRef) |
+| `WorkloadStopped` | All workloads mounting target PVCs have been stopped |
 | `SnapshotReady` | Pre-upgrade snapshots are ready |
 | `GitCommitted` | Version change committed to Git |
 | `Reconciled` | Flux has reconciled the changes |
