@@ -95,8 +95,9 @@ GITEA_POD=$(kubectl -n "${GITEA_NAMESPACE}" get pod -l app=gitea -o jsonpath='{.
 sleep 10
 
 # Create admin user (may already exist)
+# Must run as git user (UID 1000) - Gitea refuses to run as root
 kubectl -n "${GITEA_NAMESPACE}" exec "${GITEA_POD}" -- \
-    gitea admin user create \
+    su-exec git gitea admin user create \
     --username "${GITEA_ADMIN_USER}" \
     --password "${GITEA_ADMIN_PASSWORD}" \
     --email "fluxup@test.local" \
