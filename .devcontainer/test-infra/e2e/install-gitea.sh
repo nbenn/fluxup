@@ -14,18 +14,6 @@ kubectl create namespace "${GITEA_NAMESPACE}" --dry-run=client -o yaml | kubectl
 
 echo "==> Deploying Gitea..."
 cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: gitea-data
-  namespace: ${GITEA_NAMESPACE}
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -41,6 +29,10 @@ spec:
       labels:
         app: gitea
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
       - name: gitea
         image: gitea/gitea:latest
@@ -58,10 +50,10 @@ spec:
           value: "3000"
         - name: GITEA__server__SSH_DOMAIN
           value: "gitea.${GITEA_NAMESPACE}.svc.cluster.local"
-        - name: USER_UID
-          value: "1000"
-        - name: USER_GID
-          value: "1000"
+        - name: GITEA__database__DB_TYPE
+          value: "sqlite3"
+        - name: GITEA__database__PATH
+          value: "/data/gitea/gitea.db"
         volumeMounts:
         - name: data
           mountPath: /data
@@ -69,12 +61,11 @@ spec:
           httpGet:
             path: /api/v1/version
             port: 3000
-          initialDelaySeconds: 5
+          initialDelaySeconds: 10
           periodSeconds: 5
       volumes:
       - name: data
-        persistentVolumeClaim:
-          claimName: gitea-data
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -104,48 +95,51 @@ kubectl -n "${GITEA_NAMESPACE}" wait --for=condition=ready --timeout=60s pod -l 
 echo "==> Creating Gitea admin user..."
 GITEA_POD=$(kubectl -n "${GITEA_NAMESPACE}" get pod -l app=gitea -o jsonpath='{.items[0].metadata.name}')
 
-# Wait a bit for gitea to fully initialize
-sleep 5
+# Wait for gitea to fully initialize
+sleep 10
 
+# Create admin user (may already exist)
 kubectl -n "${GITEA_NAMESPACE}" exec "${GITEA_POD}" -- \
     gitea admin user create \
     --username "${GITEA_ADMIN_USER}" \
     --password "${GITEA_ADMIN_PASSWORD}" \
     --email "fluxup@test.local" \
     --admin \
-    --must-change-password=false 2>/dev/null || echo "Admin user may already exist"
+    --must-change-password=false 2>&1 || echo "Admin user may already exist"
 
-# Generate API token
+# Generate API token via API (more reliable than CLI)
 echo "==> Generating API token..."
 GITEA_URL="http://gitea.${GITEA_NAMESPACE}.svc.cluster.local:3000"
 
-# Create a job to generate the token from inside the cluster
-TOKEN=$(kubectl -n "${GITEA_NAMESPACE}" exec "${GITEA_POD}" -- \
-    gitea admin user generate-access-token \
-    --username "${GITEA_ADMIN_USER}" \
-    --scopes "write:repository,write:user" \
-    --token-name "fluxup-e2e-token" 2>/dev/null | grep -oP 'Access token was successfully created: \K.*' || echo "")
+# Use port-forward to access the API
+kubectl -n "${GITEA_NAMESPACE}" port-forward svc/gitea 3000:3000 &
+PF_PID=$!
+sleep 3
 
+# Delete existing token if present (ignore errors)
+curl -s -X DELETE \
+    -u "${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}" \
+    "http://localhost:3000/api/v1/users/${GITEA_ADMIN_USER}/tokens/fluxup-e2e-token" 2>/dev/null || true
+
+# Create new token
+TOKEN_RESPONSE=$(curl -s -X POST \
+    -u "${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}" \
+    -H "Content-Type: application/json" \
+    -d '{"name":"fluxup-e2e-token","scopes":["write:repository","write:user"]}' \
+    "http://localhost:3000/api/v1/users/${GITEA_ADMIN_USER}/tokens" 2>/dev/null || echo "")
+
+kill ${PF_PID} 2>/dev/null || true
+wait ${PF_PID} 2>/dev/null || true
+
+# Extract token from response (try both sha1 for older and token for newer Gitea)
+TOKEN=$(echo "${TOKEN_RESPONSE}" | sed -n 's/.*"sha1":"\([^"]*\)".*/\1/p')
 if [ -z "${TOKEN}" ]; then
-    echo "WARNING: Could not generate token via CLI, trying API..."
-    # Try via API using port-forward
-    kubectl -n "${GITEA_NAMESPACE}" port-forward svc/gitea 3000:3000 &
-    PF_PID=$!
-    sleep 3
-    
-    TOKEN_RESPONSE=$(curl -s -X POST \
-        -u "${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}" \
-        -H "Content-Type: application/json" \
-        -d '{"name":"fluxup-e2e-token","scopes":["write:repository","write:user"]}' \
-        "http://localhost:3000/api/v1/users/${GITEA_ADMIN_USER}/tokens" 2>/dev/null || echo "")
-    
-    kill ${PF_PID} 2>/dev/null || true
-    
-    TOKEN=$(echo "${TOKEN_RESPONSE}" | grep -o '"sha1":"[^"]*"' | cut -d'"' -f4 || echo "")
+    TOKEN=$(echo "${TOKEN_RESPONSE}" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 fi
 
 if [ -z "${TOKEN}" ]; then
     echo "ERROR: Could not generate API token"
+    echo "Response was: ${TOKEN_RESPONSE}"
     exit 1
 fi
 
