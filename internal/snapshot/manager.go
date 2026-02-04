@@ -449,3 +449,28 @@ func (m *Manager) WaitForPVCDeleted(ctx context.Context, name, namespace string,
 
 	return fmt.Errorf("timeout waiting for PVC %s/%s to be deleted", namespace, name)
 }
+
+// IsPVCDeleted checks if a PVC has been deleted (non-blocking)
+func (m *Manager) IsPVCDeleted(ctx context.Context, name, namespace string) (bool, error) {
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+	var pvc corev1.PersistentVolumeClaim
+	err := m.client.Get(ctx, key, &pvc)
+	if err != nil {
+		// NotFound means PVC is deleted
+		if client.IgnoreNotFound(err) == nil {
+			return true, nil
+		}
+		return false, fmt.Errorf("getting PVC: %w", err)
+	}
+	return false, nil
+}
+
+// IsPVCBound checks if a PVC is bound (non-blocking)
+func (m *Manager) IsPVCBound(ctx context.Context, name, namespace string) (bool, error) {
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+	var pvc corev1.PersistentVolumeClaim
+	if err := m.client.Get(ctx, key, &pvc); err != nil {
+		return false, fmt.Errorf("getting PVC: %w", err)
+	}
+	return pvc.Status.Phase == corev1.ClaimBound, nil
+}

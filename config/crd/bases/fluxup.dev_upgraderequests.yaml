@@ -179,23 +179,39 @@ spec:
                     description: 'Status: Passed, Failed, Pending'
                     type: string
                 type: object
+              phaseStartedAt:
+                description: |-
+                  PhaseStartedAt records when the current phase began.
+                  Used for per-phase timeout calculations. Reset when entering a new phase.
+                format: date-time
+                type: string
               scaling:
-                description: Scaling information (original replica count before scale-down)
+                description: Scaling information (workloads scaled down before snapshot)
                 properties:
-                  originalReplicas:
-                    description: Original replica count before scale-down
-                    format: int32
-                    type: integer
                   scaledDownAt:
-                    description: When scale-down completed
+                    description: When scale-down completed for all workloads
                     format: date-time
                     type: string
-                  workloadKind:
-                    description: Kind of the scaled workload (Deployment, StatefulSet)
-                    type: string
-                  workloadName:
-                    description: Name of the scaled workload
-                    type: string
+                  workloads:
+                    description: Workloads that were scaled down
+                    items:
+                      description: WorkloadScalingInfo records scaling details for
+                        a single workload
+                      properties:
+                        kind:
+                          description: Kind of the workload (Deployment, StatefulSet)
+                          type: string
+                        name:
+                          description: Name of the workload
+                          type: string
+                        namespace:
+                          description: Namespace of the workload
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    type: array
                 type: object
               snapshot:
                 description: Snapshot information

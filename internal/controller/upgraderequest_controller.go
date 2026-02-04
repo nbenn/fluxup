@@ -45,6 +45,18 @@ const DefaultFluxNamespace = "flux-system"
 // OperationFinalizer is used to prevent deletion of in-progress operations.
 const OperationFinalizer = "fluxup.dev/operation-protection"
 
+// Phase timeout defaults (conservative values)
+const (
+	TimeoutSuspend       = 2 * time.Minute
+	TimeoutScaleDown     = 5 * time.Minute
+	TimeoutSnapshot      = 30 * time.Minute
+	TimeoutGitCommit     = 2 * time.Minute
+	TimeoutReconcile     = 10 * time.Minute
+	TimeoutHealthCheck   = 5 * time.Minute
+	TimeoutVolumeRestore = 30 * time.Minute
+	TimeoutGitRevert     = 2 * time.Minute
+)
+
 // UpgradeRequestReconciler reconciles an UpgradeRequest
 type UpgradeRequestReconciler struct {
 	client.Client
@@ -54,6 +66,29 @@ type UpgradeRequestReconciler struct {
 	FluxHelper      *flux.Helper
 	WorkloadScaler  *workload.Scaler
 	YAMLEditor      *yamlpkg.Editor
+}
+
+// setPhaseStartIfNeeded sets PhaseStartedAt if not already set for this reconcile cycle.
+// Call this at the beginning of each phase handler when entering a new phase.
+func (r *UpgradeRequestReconciler) setPhaseStartIfNeeded(upgrade *fluxupv1alpha1.UpgradeRequest) {
+	if upgrade.Status.PhaseStartedAt == nil {
+		now := metav1.Now()
+		upgrade.Status.PhaseStartedAt = &now
+	}
+}
+
+// resetPhaseStart clears PhaseStartedAt to mark the transition to a new phase.
+// Call this when a phase completes successfully before moving to the next phase.
+func (r *UpgradeRequestReconciler) resetPhaseStart(upgrade *fluxupv1alpha1.UpgradeRequest) {
+	upgrade.Status.PhaseStartedAt = nil
+}
+
+// isPhaseTimedOut checks if the current phase has exceeded its timeout.
+func (r *UpgradeRequestReconciler) isPhaseTimedOut(upgrade *fluxupv1alpha1.UpgradeRequest, timeout time.Duration) bool {
+	if upgrade.Status.PhaseStartedAt == nil {
+		return false
+	}
+	return time.Since(upgrade.Status.PhaseStartedAt.Time) > timeout
 }
 
 // +kubebuilder:rbac:groups=fluxup.dev,resources=upgraderequests,verbs=get;list;watch;create;update;patch;delete
@@ -188,6 +223,14 @@ func (r *UpgradeRequestReconciler) handleDryRun(ctx context.Context, upgrade *fl
 		return ctrl.Result{}, err
 	}
 
+	// Remove finalizer for dry run
+	if controllerutil.ContainsFinalizer(upgrade, OperationFinalizer) {
+		controllerutil.RemoveFinalizer(upgrade, OperationFinalizer)
+		if err := r.Update(ctx, upgrade); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -296,91 +339,42 @@ func (r *UpgradeRequestReconciler) getSuspendRefStruct(app *fluxupv1alpha1.Manag
 	return &struct{ Name, Namespace string }{Name: app.Spec.SuspendRef.Name, Namespace: ns}
 }
 
-// handleScaleDown scales the workload to 0 replicas before snapshotting.
-// Returns (result, error, shouldContinue). If shouldContinue is true, no workload
-// is configured and the caller should continue to the next step.
+// handleScaleDown scales workloads to 0 replicas before snapshotting.
+// Returns (result, error, shouldContinue). If shouldContinue is true, no workloads
+// need scaling and the caller should continue to the next step.
+// TODO: Implement auto-discovery of workloads from PVCs (Issue 1)
 func (r *UpgradeRequestReconciler) handleScaleDown(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error, bool) {
 	logger := logging.FromContext(ctx)
 
-	app, err := r.getManagedApp(ctx, upgrade)
+	_, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
 		result, err := r.setFailed(ctx, upgrade, "ManagedAppNotFound", err.Error())
 		return result, err, false
 	}
 
-	// If no workloadRef configured, skip scaling (return shouldContinue=true)
-	if app.Spec.WorkloadRef == nil {
-		logger.Debug("no workloadRef configured, skipping workload stop")
-		// Mark as stopped (skipped) so we don't check this again
-		meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
-			Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
-			Status:             metav1.ConditionTrue,
-			Reason:             "Skipped",
-			Message:            "No workloadRef configured",
-			ObservedGeneration: upgrade.Generation,
-		})
-		if err := r.Status().Update(ctx, upgrade); err != nil {
-			return ctrl.Result{}, err, false
-		}
-		return ctrl.Result{Requeue: true}, nil, true
-	}
-
-	workloadRef := app.Spec.WorkloadRef
-	workloadNS := workloadRef.Namespace
-	if workloadNS == "" {
-		workloadNS = app.Namespace
-	}
-
-	// Scale down the workload
-	scaleInfo, err := r.WorkloadScaler.ScaleDown(ctx, workloadRef.Kind, workloadRef.Name, workloadNS)
-	if err != nil {
-		result, err := r.setFailed(ctx, upgrade, "ScaleDownFailed", err.Error())
-		return result, err, false
-	}
-
-	logger.Info("scaling down workload",
-		"kind", workloadRef.Kind,
-		"name", workloadRef.Name,
-		"originalReplicas", scaleInfo.OriginalReplicas)
-
-	// Record scaling info in status
-	now := metav1.Now()
-	upgrade.Status.Scaling = &fluxupv1alpha1.ScalingStatus{
-		WorkloadKind:     scaleInfo.Kind,
-		WorkloadName:     scaleInfo.Name,
-		OriginalReplicas: scaleInfo.OriginalReplicas,
-		ScaledDownAt:     &now,
-	}
-
-	// Wait for scale down to complete (with timeout)
-	scaleTimeout := 5 * time.Minute
-	if err := r.WorkloadScaler.WaitForScaleDown(ctx, workloadRef.Kind, workloadRef.Name, workloadNS, scaleTimeout); err != nil {
-		// Check if it's just not ready yet vs actual error
-		if ctx.Err() == nil {
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, false
-		}
-		result, err := r.setFailed(ctx, upgrade, "ScaleDownTimeout", err.Error())
-		return result, err, false
-	}
-
+	// TODO: Auto-discover workloads from PVCs
+	// For now, skip scaling - will be implemented in Issue 1
+	logger.Debug("workload auto-discovery not yet implemented, skipping scale down")
 	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
 		Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
 		Status:             metav1.ConditionTrue,
-		Reason:             "WorkloadStopped",
-		Message:            fmt.Sprintf("Stopped %s/%s (was %d replicas)", workloadRef.Kind, workloadRef.Name, scaleInfo.OriginalReplicas),
+		Reason:             "Skipped",
+		Message:            "Workload auto-discovery not yet implemented",
 		ObservedGeneration: upgrade.Generation,
 	})
-
 	if err := r.Status().Update(ctx, upgrade); err != nil {
 		return ctrl.Result{}, err, false
 	}
+	return ctrl.Result{Requeue: true}, nil, true
 
-	return ctrl.Result{Requeue: true}, nil, false
 }
 
 // handleSnapshotting creates pre-upgrade snapshots
 func (r *UpgradeRequestReconciler) handleSnapshotting(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
+
+	// Set phase start time for timeout tracking
+	r.setPhaseStartIfNeeded(upgrade)
 
 	app, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
@@ -433,11 +427,17 @@ func (r *UpgradeRequestReconciler) handleSnapshotting(ctx context.Context, upgra
 	}
 
 	if !allReady {
+		// Check per-phase timeout for snapshot readiness
+		if r.isPhaseTimedOut(upgrade, TimeoutSnapshot) {
+			return r.setFailed(ctx, upgrade, "SnapshotTimeout", "Snapshots did not become ready within timeout")
+		}
 		logger.Debug("waiting for snapshots to become ready")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// All snapshots ready
+	// All snapshots ready - reset phase timer for next phase
+	r.resetPhaseStart(upgrade)
+
 	now := metav1.Now()
 	upgrade.Status.Snapshot.ReadyAt = &now
 	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
@@ -570,6 +570,9 @@ func (r *UpgradeRequestReconciler) handleCommitting(ctx context.Context, upgrade
 func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
+	// Set phase start time for timeout tracking
+	r.setPhaseStartIfNeeded(upgrade)
+
 	app, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
 		return r.setFailed(ctx, upgrade, "ManagedAppNotFound", err.Error())
@@ -610,18 +613,16 @@ func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrad
 	}
 
 	if !reconciled {
-		// Check timeout
-		timeout := 10 * time.Minute
-		if upgrade.Status.Upgrade != nil && upgrade.Status.Upgrade.StartedAt != nil {
-			elapsed := time.Since(upgrade.Status.Upgrade.StartedAt.Time)
-			if elapsed > timeout {
-				return r.setFailed(ctx, upgrade, "ReconciliationTimeout", "Kustomization did not reconcile within timeout")
-			}
+		// Check per-phase timeout
+		if r.isPhaseTimedOut(upgrade, TimeoutReconcile) {
+			return r.setFailed(ctx, upgrade, "ReconciliationTimeout", "Kustomization did not reconcile within timeout")
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Reconciliation complete
+	// Reconciliation complete - reset phase timer for next phase
+	r.resetPhaseStart(upgrade)
+
 	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
 		Type:               fluxupv1alpha1.ConditionTypeReconciled,
 		Status:             metav1.ConditionTrue,
@@ -641,6 +642,9 @@ func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrad
 func (r *UpgradeRequestReconciler) handleHealthChecking(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
+	// Set phase start time for timeout tracking
+	r.setPhaseStartIfNeeded(upgrade)
+
 	app, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
 		return r.setFailed(ctx, upgrade, "ManagedAppNotFound", err.Error())
@@ -656,19 +660,16 @@ func (r *UpgradeRequestReconciler) handleHealthChecking(ctx context.Context, upg
 	}
 
 	if !healthy {
-		// Check timeout
-		timeout := 5 * time.Minute
+		// Check per-phase timeout (use configured timeout if available)
+		timeout := TimeoutHealthCheck
 		if app.Spec.HealthCheck != nil && app.Spec.HealthCheck.Timeout != "" {
 			if parsed, err := time.ParseDuration(app.Spec.HealthCheck.Timeout); err == nil {
 				timeout = parsed
 			}
 		}
 
-		if upgrade.Status.Upgrade != nil && upgrade.Status.Upgrade.StartedAt != nil {
-			elapsed := time.Since(upgrade.Status.Upgrade.StartedAt.Time)
-			if elapsed > timeout {
-				return r.setFailed(ctx, upgrade, "HealthCheckTimeout", "Workload did not become healthy within timeout")
-			}
+		if r.isPhaseTimedOut(upgrade, timeout) {
+			return r.setFailed(ctx, upgrade, "HealthCheckTimeout", "Workload did not become healthy within timeout")
 		}
 
 		logger.Debug("workload not yet healthy, waiting")

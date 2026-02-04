@@ -53,6 +53,29 @@ type RollbackRequestReconciler struct {
 	YAMLEditor      *yamlpkg.Editor
 }
 
+// setPhaseStartIfNeeded sets PhaseStartedAt if not already set for this reconcile cycle.
+// Call this at the beginning of each phase handler when entering a new phase.
+func (r *RollbackRequestReconciler) setPhaseStartIfNeeded(rollback *fluxupv1alpha1.RollbackRequest) {
+	if rollback.Status.PhaseStartedAt == nil {
+		now := metav1.Now()
+		rollback.Status.PhaseStartedAt = &now
+	}
+}
+
+// resetPhaseStart clears PhaseStartedAt to mark the transition to a new phase.
+// Call this when a phase completes successfully before moving to the next phase.
+func (r *RollbackRequestReconciler) resetPhaseStart(rollback *fluxupv1alpha1.RollbackRequest) {
+	rollback.Status.PhaseStartedAt = nil
+}
+
+// isPhaseTimedOut checks if the current phase has exceeded its timeout.
+func (r *RollbackRequestReconciler) isPhaseTimedOut(rollback *fluxupv1alpha1.RollbackRequest, timeout time.Duration) bool {
+	if rollback.Status.PhaseStartedAt == nil {
+		return false
+	}
+	return time.Since(rollback.Status.PhaseStartedAt.Time) > timeout
+}
+
 // +kubebuilder:rbac:groups=fluxup.dev,resources=rollbackrequests,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=fluxup.dev,resources=rollbackrequests/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=fluxup.dev,resources=rollbackrequests/finalizers,verbs=update
@@ -289,7 +312,10 @@ func (r *RollbackRequestReconciler) handleSuspend(ctx context.Context, rollback 
 	return ctrl.Result{Requeue: true}, nil
 }
 
-// handleStopWorkload scales the workload to 0 replicas
+// handleStopWorkload scales workloads to 0 replicas before volume restore.
+// Returns (result, error, shouldContinue). If shouldContinue is true, no workloads
+// need scaling and the caller should continue to the next step.
+// TODO: Implement auto-discovery of workloads from PVCs (Issue 1)
 func (r *RollbackRequestReconciler) handleStopWorkload(ctx context.Context, rollback *fluxupv1alpha1.RollbackRequest) (ctrl.Result, error, bool) {
 	logger := logging.FromContext(ctx)
 
@@ -299,76 +325,34 @@ func (r *RollbackRequestReconciler) handleStopWorkload(ctx context.Context, roll
 		return result, err, false
 	}
 
-	app, err := r.getManagedApp(ctx, upgrade)
+	_, err = r.getManagedApp(ctx, upgrade)
 	if err != nil {
 		result, err := r.setFailed(ctx, rollback, "ManagedAppNotFound", err.Error())
 		return result, err, false
 	}
 
-	// If no workloadRef configured, skip scaling (return shouldContinue=true)
-	if app.Spec.WorkloadRef == nil {
-		logger.Debug("no workloadRef configured, skipping workload stop")
-		// Mark as stopped (skipped) so we don't check this again
-		meta.SetStatusCondition(&rollback.Status.Conditions, metav1.Condition{
-			Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
-			Status:             metav1.ConditionTrue,
-			Reason:             "Skipped",
-			Message:            "No workloadRef configured",
-			ObservedGeneration: rollback.Generation,
-		})
-		if err := r.Status().Update(ctx, rollback); err != nil {
-			return ctrl.Result{}, err, false
-		}
-		return ctrl.Result{Requeue: true}, nil, true
-	}
-
-	workloadRef := app.Spec.WorkloadRef
-	workloadNS := workloadRef.Namespace
-	if workloadNS == "" {
-		workloadNS = app.Namespace
-	}
-
-	// Scale down the workload
-	scaleInfo, err := r.WorkloadScaler.ScaleDown(ctx, workloadRef.Kind, workloadRef.Name, workloadNS)
-	if err != nil {
-		result, err := r.setFailed(ctx, rollback, "StopWorkloadFailed", err.Error())
-		return result, err, false
-	}
-
-	logger.Info("stopping workload",
-		"kind", workloadRef.Kind,
-		"name", workloadRef.Name,
-		"originalReplicas", scaleInfo.OriginalReplicas)
-
-	// Wait for scale down to complete (with timeout)
-	scaleTimeout := 5 * time.Minute
-	if err := r.WorkloadScaler.WaitForScaleDown(ctx, workloadRef.Kind, workloadRef.Name, workloadNS, scaleTimeout); err != nil {
-		// Check if it's just not ready yet vs actual error
-		if ctx.Err() == nil {
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, false
-		}
-		result, err := r.setFailed(ctx, rollback, "StopWorkloadTimeout", err.Error())
-		return result, err, false
-	}
-
+	// TODO: Auto-discover workloads from PVCs
+	// For now, skip scaling - will be implemented in Issue 1
+	logger.Debug("workload auto-discovery not yet implemented, skipping workload stop")
 	meta.SetStatusCondition(&rollback.Status.Conditions, metav1.Condition{
 		Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
 		Status:             metav1.ConditionTrue,
-		Reason:             "WorkloadStopped",
-		Message:            fmt.Sprintf("Stopped %s/%s (was %d replicas)", workloadRef.Kind, workloadRef.Name, scaleInfo.OriginalReplicas),
+		Reason:             "Skipped",
+		Message:            "Workload auto-discovery not yet implemented",
 		ObservedGeneration: rollback.Generation,
 	})
-
 	if err := r.Status().Update(ctx, rollback); err != nil {
 		return ctrl.Result{}, err, false
 	}
-
-	return ctrl.Result{Requeue: true}, nil, false
+	return ctrl.Result{Requeue: true}, nil, true
 }
 
 // handleVolumeRestore deletes current PVCs and creates new ones from snapshots
 func (r *RollbackRequestReconciler) handleVolumeRestore(ctx context.Context, rollback *fluxupv1alpha1.RollbackRequest) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
+
+	// Set phase start time for timeout tracking
+	r.setPhaseStartIfNeeded(rollback)
 
 	upgrade, err := r.getUpgradeRequest(ctx, rollback)
 	if err != nil {
@@ -420,17 +404,20 @@ func (r *RollbackRequestReconciler) handleVolumeRestore(ctx context.Context, rol
 			}
 		}
 
-		// Wait for PVC to be fully deleted
-		deleteTimeout := 5 * time.Minute
-		if err := r.SnapshotManager.WaitForPVCDeleted(ctx, snapInfo.PVCName, app.Namespace, deleteTimeout); err != nil {
-			if ctx.Err() == nil {
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		// Wait for PVC to be fully deleted (non-blocking check with phase timeout)
+		deleted, err := r.SnapshotManager.IsPVCDeleted(ctx, snapInfo.PVCName, app.Namespace)
+		if err != nil {
+			return r.setFailed(ctx, rollback, "PVCDeleteCheckFailed", err.Error())
+		}
+		if !deleted {
+			if r.isPhaseTimedOut(rollback, TimeoutVolumeRestore) {
+				return r.setFailed(ctx, rollback, "PVCDeleteTimeout", "PVC deletion timed out")
 			}
-			return r.setFailed(ctx, rollback, "PVCDeleteTimeout", err.Error())
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 
 		// Create new PVC from snapshot
-		_, err := r.SnapshotManager.RestorePVCFromSnapshot(ctx, snapshot.RestoreRequest{
+		_, err = r.SnapshotManager.RestorePVCFromSnapshot(ctx, snapshot.RestoreRequest{
 			SnapshotName:      snapInfo.SnapshotName,
 			SnapshotNamespace: app.Namespace,
 			NewPVCName:        snapInfo.PVCName,
@@ -462,18 +449,24 @@ func (r *RollbackRequestReconciler) handleVolumeRestore(ctx context.Context, rol
 			continue
 		}
 
-		bindTimeout := 5 * time.Minute
-		if err := r.SnapshotManager.WaitForPVCBound(ctx, restored.PVCName, app.Namespace, bindTimeout); err != nil {
-			if ctx.Err() == nil {
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		// Check if PVC is bound (non-blocking check with phase timeout)
+		bound, err := r.SnapshotManager.IsPVCBound(ctx, restored.PVCName, app.Namespace)
+		if err != nil {
+			return r.setFailed(ctx, rollback, "PVCBoundCheckFailed", err.Error())
+		}
+		if !bound {
+			if r.isPhaseTimedOut(rollback, TimeoutVolumeRestore) {
+				return r.setFailed(ctx, rollback, "PVCBindTimeout", "PVC binding timed out")
 			}
-			return r.setFailed(ctx, rollback, "PVCBindTimeout", err.Error())
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 
 		rollback.Status.VolumeRestore.RestoredPVCs[i].RestorationState = "Restored"
 	}
 
-	// All PVCs restored
+	// All PVCs restored - reset phase timer for next phase
+	r.resetPhaseStart(rollback)
+
 	now := metav1.Now()
 	rollback.Status.VolumeRestore.CompletedAt = &now
 
@@ -603,6 +596,9 @@ func (r *RollbackRequestReconciler) handleGitRevert(ctx context.Context, rollbac
 func (r *RollbackRequestReconciler) handleReconciling(ctx context.Context, rollback *fluxupv1alpha1.RollbackRequest) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
+	// Set phase start time for timeout tracking
+	r.setPhaseStartIfNeeded(rollback)
+
 	upgrade, err := r.getUpgradeRequest(ctx, rollback)
 	if err != nil {
 		return r.setFailed(ctx, rollback, "UpgradeRequestNotFound", err.Error())
@@ -647,18 +643,16 @@ func (r *RollbackRequestReconciler) handleReconciling(ctx context.Context, rollb
 	}
 
 	if !reconciled {
-		// Check timeout
-		timeout := 10 * time.Minute
-		if rollback.Status.StartedAt != nil {
-			elapsed := time.Since(rollback.Status.StartedAt.Time)
-			if elapsed > timeout {
-				return r.setFailed(ctx, rollback, "ReconciliationTimeout", "Kustomization did not reconcile within timeout")
-			}
+		// Check per-phase timeout
+		if r.isPhaseTimedOut(rollback, TimeoutReconcile) {
+			return r.setFailed(ctx, rollback, "ReconciliationTimeout", "Kustomization did not reconcile within timeout")
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Reconciliation complete
+	// Reconciliation complete - reset phase timer for next phase
+	r.resetPhaseStart(rollback)
+
 	meta.SetStatusCondition(&rollback.Status.Conditions, metav1.Condition{
 		Type:               fluxupv1alpha1.ConditionTypeReconciled,
 		Status:             metav1.ConditionTrue,
@@ -677,6 +671,9 @@ func (r *RollbackRequestReconciler) handleReconciling(ctx context.Context, rollb
 // handleHealthChecking verifies the rollback succeeded
 func (r *RollbackRequestReconciler) handleHealthChecking(ctx context.Context, rollback *fluxupv1alpha1.RollbackRequest) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
+
+	// Set phase start time for timeout tracking
+	r.setPhaseStartIfNeeded(rollback)
 
 	upgrade, err := r.getUpgradeRequest(ctx, rollback)
 	if err != nil {
@@ -698,19 +695,16 @@ func (r *RollbackRequestReconciler) handleHealthChecking(ctx context.Context, ro
 	}
 
 	if !healthy {
-		// Check timeout
-		timeout := 5 * time.Minute
+		// Check per-phase timeout (use configured timeout if available)
+		timeout := TimeoutHealthCheck
 		if app.Spec.HealthCheck != nil && app.Spec.HealthCheck.Timeout != "" {
 			if parsed, err := time.ParseDuration(app.Spec.HealthCheck.Timeout); err == nil {
 				timeout = parsed
 			}
 		}
 
-		if rollback.Status.StartedAt != nil {
-			elapsed := time.Since(rollback.Status.StartedAt.Time)
-			if elapsed > timeout {
-				return r.setFailed(ctx, rollback, "HealthCheckTimeout", "Workload did not become healthy within timeout")
-			}
+		if r.isPhaseTimedOut(rollback, timeout) {
+			return r.setFailed(ctx, rollback, "HealthCheckTimeout", "Workload did not become healthy within timeout")
 		}
 
 		logger.Debug("workload not yet healthy, waiting")

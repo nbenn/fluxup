@@ -44,12 +44,13 @@ type ManagedAppSpec struct {
 	// +optional
 	SuspendRef *ObjectReference `json:"suspendRef,omitempty"`
 
-	// Optional: explicit workload reference for health checks
-	// If omitted, controller checks only the Kustomization status
+	// HelmReleaseRef references a HelmRelease for PVC and workload discovery.
+	// If set, the controller will discover RWO PVCs and workloads from the Helm release.
+	// If not set, the controller will attempt to discover from the Kustomization's inventory.
 	// +optional
-	WorkloadRef *WorkloadReference `json:"workloadRef,omitempty"`
+	HelmReleaseRef *ObjectReference `json:"helmReleaseRef,omitempty"`
 
-	// Volume snapshot configuration (Phase 2)
+	// Volume snapshot configuration
 	// +optional
 	VolumeSnapshots *VolumeSnapshotConfig `json:"volumeSnapshots,omitempty"`
 
@@ -77,24 +78,28 @@ type ObjectReference struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// WorkloadReference references a workload for health checks
-type WorkloadReference struct {
-	// +kubebuilder:validation:Enum=Deployment;StatefulSet;HelmRelease
-	Kind string `json:"kind"`
-
-	// +kubebuilder:validation:Required
-	Name string `json:"name"`
-
-	// +optional
-	Namespace string `json:"namespace,omitempty"`
-}
-
-// VolumeSnapshotConfig configures volume snapshots before upgrades (Phase 2)
+// VolumeSnapshotConfig configures volume snapshots
 type VolumeSnapshotConfig struct {
-	Enabled                 bool             `json:"enabled"`
-	VolumeSnapshotClassName string           `json:"volumeSnapshotClassName,omitempty"`
-	PVCs                    []PVCRef         `json:"pvcs,omitempty"`
-	RetentionPolicy         *RetentionPolicy `json:"retentionPolicy,omitempty"`
+	// Enabled enables volume snapshots before upgrades
+	Enabled bool `json:"enabled"`
+
+	// VolumeSnapshotClassName is the name of the VolumeSnapshotClass to use
+	// +optional
+	VolumeSnapshotClassName string `json:"volumeSnapshotClassName,omitempty"`
+
+	// PVCs is an explicit list of PVCs to snapshot. If not specified,
+	// the controller will auto-discover RWO PVCs from the app's workloads.
+	// +optional
+	PVCs []PVCRef `json:"pvcs,omitempty"`
+
+	// ExcludePVCs is a list of PVC names to exclude from auto-discovery.
+	// Useful for excluding ephemeral volumes like caches.
+	// +optional
+	ExcludePVCs []PVCRef `json:"excludePVCs,omitempty"`
+
+	// RetentionPolicy defines how many snapshots to keep per PVC
+	// +optional
+	RetentionPolicy *RetentionPolicy `json:"retentionPolicy,omitempty"`
 }
 
 // PVCRef references a PVC for snapshotting

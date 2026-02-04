@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	helmv2 "github.com/fluxcd/helm-controller/api/v2"
@@ -63,14 +62,14 @@ func (r *ManagedAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	logger.Info("reconciling ManagedApp", "gitPath", app.Spec.GitPath)
 
-	// 2. Check workload health
+	// 2. Check app health (currently only checks Kustomization, will be expanded in Issue 2)
 	ready, err := r.checkWorkloadHealth(ctx, &app)
 	if err != nil {
-		// Set condition: workload not found, requeue with backoff
+		// Set condition: Kustomization not found, requeue with backoff
 		meta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
 			Type:               fluxupv1alpha1.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             "WorkloadNotFound",
+			Reason:             "KustomizationNotFound",
 			Message:            err.Error(),
 			ObservedGeneration: app.Generation,
 		})
@@ -82,10 +81,10 @@ func (r *ManagedAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// 3. Update Ready condition
 	status := metav1.ConditionFalse
-	reason := "WorkloadNotReady"
+	reason := "KustomizationNotReady"
 	if ready {
 		status = metav1.ConditionTrue
-		reason = "WorkloadReady"
+		reason = "KustomizationReady"
 	}
 	meta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
 		Type:               fluxupv1alpha1.ConditionTypeReady,
@@ -104,50 +103,11 @@ func (r *ManagedAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 
 // checkWorkloadHealth determines if the workload is healthy
+// TODO: Implement full health check with workload auto-discovery (Issue 2)
 func (r *ManagedAppReconciler) checkWorkloadHealth(ctx context.Context, app *fluxupv1alpha1.ManagedApp) (bool, error) {
-	if app.Spec.WorkloadRef == nil {
-		// No explicit workload ref - just check the Kustomization is ready
-		return r.checkKustomizationHealth(ctx, app)
-	}
-
-	ref := app.Spec.WorkloadRef
-	ns := ref.Namespace
-	if ns == "" {
-		ns = app.Namespace
-	}
-	key := types.NamespacedName{Name: ref.Name, Namespace: ns}
-
-	switch ref.Kind {
-	case "HelmRelease":
-		var hr helmv2.HelmRelease
-		if err := r.Get(ctx, key, &hr); err != nil {
-			return false, err
-		}
-		return isHelmReleaseReady(&hr), nil
-
-	case "Deployment":
-		var deploy appsv1.Deployment
-		if err := r.Get(ctx, key, &deploy); err != nil {
-			return false, err
-		}
-		if deploy.Spec.Replicas == nil {
-			return deploy.Status.ReadyReplicas > 0, nil
-		}
-		return deploy.Status.ReadyReplicas == *deploy.Spec.Replicas, nil
-
-	case "StatefulSet":
-		var sts appsv1.StatefulSet
-		if err := r.Get(ctx, key, &sts); err != nil {
-			return false, err
-		}
-		if sts.Spec.Replicas == nil {
-			return sts.Status.ReadyReplicas > 0, nil
-		}
-		return sts.Status.ReadyReplicas == *sts.Spec.Replicas, nil
-
-	default:
-		return false, fmt.Errorf("unsupported workload kind: %s", ref.Kind)
-	}
+	// For now, just check the Kustomization is ready
+	// Full workload health checking will be implemented in Issue 2
+	return r.checkKustomizationHealth(ctx, app)
 }
 
 func (r *ManagedAppReconciler) checkKustomizationHealth(ctx context.Context, app *fluxupv1alpha1.ManagedApp) (bool, error) {
@@ -171,58 +131,14 @@ func (r *ManagedAppReconciler) checkKustomizationHealth(ctx context.Context, app
 	return false, nil
 }
 
-func isHelmReleaseReady(hr *helmv2.HelmRelease) bool {
-	for _, cond := range hr.Status.Conditions {
-		if cond.Type == "Ready" && cond.Status == metav1.ConditionTrue {
-			return true
-		}
-	}
-	return false
-}
-
 // findManagedAppsForWorkload maps workload changes back to ManagedApps
+// TODO: Update to use auto-discovered workloads instead of explicit refs (Issue 2)
 func (r *ManagedAppReconciler) findManagedAppsForWorkload(ctx context.Context, obj client.Object) []reconcile.Request {
-	var apps fluxupv1alpha1.ManagedAppList
-	if err := r.List(ctx, &apps); err != nil {
-		return nil
-	}
-
-	var requests []reconcile.Request
-	for _, app := range apps.Items {
-		if app.Spec.WorkloadRef == nil {
-			continue
-		}
-		ref := app.Spec.WorkloadRef
-		ns := ref.Namespace
-		if ns == "" {
-			ns = app.Namespace
-		}
-
-		// Get the kind from the object
-		gvk := obj.GetObjectKind().GroupVersionKind()
-		objKind := gvk.Kind
-		// If GVK is not set (common for typed objects), infer from type
-		if objKind == "" {
-			switch obj.(type) {
-			case *appsv1.Deployment:
-				objKind = "Deployment"
-			case *appsv1.StatefulSet:
-				objKind = "StatefulSet"
-			case *helmv2.HelmRelease:
-				objKind = "HelmRelease"
-			}
-		}
-
-		if ref.Kind == objKind && ref.Name == obj.GetName() && ns == obj.GetNamespace() {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      app.Name,
-					Namespace: app.Namespace,
-				},
-			})
-		}
-	}
-	return requests
+	// With workload auto-discovery, we can't easily map workload changes back to ManagedApps
+	// without caching the discovery results. For now, return empty - the periodic reconcile
+	// will catch workload status changes. This will be improved in Issue 2.
+	_ = obj // unused for now
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

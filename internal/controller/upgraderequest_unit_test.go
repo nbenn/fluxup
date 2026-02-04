@@ -1463,8 +1463,9 @@ func TestUpgradeRequest_AutoRollback_CreatesRollbackRequest(t *testing.T) {
 	}
 
 	// Keep reconciling - health check will fail, but we need to wait for timeout
-	// For the test, we'll set a very old StartedAt to trigger timeout
-	upgrade.Status.Upgrade.StartedAt = &metav1.Time{Time: now.Add(-10 * time.Minute)}
+	// For the test, we'll set a very old PhaseStartedAt to trigger timeout
+	oldTime := metav1.Time{Time: now.Add(-10 * time.Minute)}
+	upgrade.Status.PhaseStartedAt = &oldTime
 	if err := r.Status().Update(ctx, upgrade); err != nil {
 		t.Fatalf("failed to update upgrade status: %v", err)
 	}

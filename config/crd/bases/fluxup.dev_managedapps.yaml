@@ -69,6 +69,19 @@ spec:
                     description: Timeout for health checks
                     type: string
                 type: object
+              helmReleaseRef:
+                description: |-
+                  HelmReleaseRef references a HelmRelease for PVC and workload discovery.
+                  If set, the controller will discover RWO PVCs and workloads from the Helm release.
+                  If not set, the controller will attempt to discover from the Kustomization's inventory.
+                properties:
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
               kustomizationRef:
                 description: Reference to the Flux Kustomization that reconciles this
                   app (for suspend/resume)
@@ -113,11 +126,30 @@ spec:
                     type: string
                 type: object
               volumeSnapshots:
-                description: Volume snapshot configuration (Phase 2)
+                description: Volume snapshot configuration
                 properties:
                   enabled:
+                    description: Enabled enables volume snapshots before upgrades
                     type: boolean
+                  excludePVCs:
+                    description: |-
+                      ExcludePVCs is a list of PVC names to exclude from auto-discovery.
+                      Useful for excluding ephemeral volumes like caches.
+                    items:
+                      description: PVCRef references a PVC for snapshotting
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
                   pvcs:
+                    description: |-
+                      PVCs is an explicit list of PVCs to snapshot. If not specified,
+                      the controller will auto-discover RWO PVCs from the app's workloads.
                     items:
                       description: PVCRef references a PVC for snapshotting
                       properties:
@@ -131,6 +163,7 @@ spec:
                     type: array
                   retentionPolicy:
                     description: RetentionPolicy defines how many snapshots to keep
+                      per PVC
                     properties:
                       maxCount:
                         default: 3
@@ -142,28 +175,11 @@ spec:
                         type: integer
                     type: object
                   volumeSnapshotClassName:
+                    description: VolumeSnapshotClassName is the name of the VolumeSnapshotClass
+                      to use
                     type: string
                 required:
                 - enabled
-                type: object
-              workloadRef:
-                description: |-
-                  Optional: explicit workload reference for health checks
-                  If omitted, controller checks only the Kustomization status
-                properties:
-                  kind:
-                    enum:
-                    - Deployment
-                    - StatefulSet
-                    - HelmRelease
-                    type: string
-                  name:
-                    type: string
-                  namespace:
-                    type: string
-                required:
-                - kind
-                - name
                 type: object
             required:
             - gitPath

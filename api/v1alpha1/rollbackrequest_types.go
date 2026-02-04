@@ -67,6 +67,11 @@ type RollbackRequestStatus struct {
 	// +optional
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 
+	// PhaseStartedAt records when the current phase began.
+	// Used for per-phase timeout calculations. Reset when entering a new phase.
+	// +optional
+	PhaseStartedAt *metav1.Time `json:"phaseStartedAt,omitempty"`
+
 	// Conditions represent the current state of the rollback.
 	// The controller determines the current step by checking which conditions are set:
 	// - Suspended=True: Flux suspended

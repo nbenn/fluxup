@@ -67,7 +67,7 @@ type UpgradeRequestSpec struct {
 // UpgradeRequestStatus defines the observed state of UpgradeRequest
 // Progress is tracked via conditions (no phase field - following K8s API conventions)
 type UpgradeRequestStatus struct {
-	// Scaling information (original replica count before scale-down)
+	// Scaling information (workloads scaled down before snapshot)
 	// +optional
 	Scaling *ScalingStatus `json:"scaling,omitempty"`
 
@@ -83,6 +83,11 @@ type UpgradeRequestStatus struct {
 	// +optional
 	HealthCheck *HealthCheckStatus `json:"healthCheck,omitempty"`
 
+	// PhaseStartedAt records when the current phase began.
+	// Used for per-phase timeout calculations. Reset when entering a new phase.
+	// +optional
+	PhaseStartedAt *metav1.Time `json:"phaseStartedAt,omitempty"`
+
 	// Conditions represent the current state of the upgrade.
 	// The controller determines the current step by checking which conditions are set:
 	// - No conditions set: validation/suspend step
@@ -97,21 +102,26 @@ type UpgradeRequestStatus struct {
 
 // ScalingStatus records workload scaling details
 type ScalingStatus struct {
-	// Kind of the scaled workload (Deployment, StatefulSet)
+	// Workloads that were scaled down
 	// +optional
-	WorkloadKind string `json:"workloadKind,omitempty"`
+	Workloads []WorkloadScalingInfo `json:"workloads,omitempty"`
 
-	// Name of the scaled workload
-	// +optional
-	WorkloadName string `json:"workloadName,omitempty"`
-
-	// Original replica count before scale-down
-	// +optional
-	OriginalReplicas int32 `json:"originalReplicas,omitempty"`
-
-	// When scale-down completed
+	// When scale-down completed for all workloads
 	// +optional
 	ScaledDownAt *metav1.Time `json:"scaledDownAt,omitempty"`
+}
+
+// WorkloadScalingInfo records scaling details for a single workload
+type WorkloadScalingInfo struct {
+	// Kind of the workload (Deployment, StatefulSet)
+	Kind string `json:"kind"`
+
+	// Name of the workload
+	Name string `json:"name"`
+
+	// Namespace of the workload
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // SnapshotStatus records snapshot creation details
