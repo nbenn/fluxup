@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -758,5 +760,743 @@ func TestRollbackRequest_FinalizerAddedOnStart(t *testing.T) {
 
 	if !slices.Contains(result.Finalizers, OperationFinalizer) {
 		t.Errorf("expected finalizer %s to be added, got %v", OperationFinalizer, result.Finalizers)
+	}
+}
+
+// =============================================================================
+// Rollback Timeout and Failure Scenario Tests
+// =============================================================================
+
+func TestRollbackRequest_ReconcileTimeout(t *testing.T) {
+	// Test: Rollback reconciliation times out after Git revert
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false, // Resumed but not reconciled
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionFalse,
+					Reason: "Progressing",
+				},
+			},
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+	}
+
+	now := metav1.Now()
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeComplete,
+					Status: metav1.ConditionFalse,
+					Reason: "HealthCheckTimeout",
+				},
+			},
+			Snapshot: &fluxupv1alpha1.SnapshotStatus{
+				CreatedAt:    &now,
+				PVCSnapshots: []fluxupv1alpha1.PVCSnapshotInfo{},
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+		},
+	}
+
+	// Set past time to trigger timeout
+	pastTime := metav1.Time{Time: now.Add(-15 * time.Minute)} // > TimeoutReconcile (10m)
+
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-rollback",
+			Namespace:  "default",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-upgrade",
+			},
+		},
+		Status: fluxupv1alpha1.RollbackRequestStatus{
+			StartedAt:      &now,
+			PhaseStartedAt: &pastTime, // Timeout will trigger
+			RestoredFrom: &fluxupv1alpha1.RestoredFromStatus{
+				UpgradeRequestName: "test-upgrade",
+				TargetVersion:      &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				RolledBackVersion:  &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionFalse,
+					Reason: "KustomizationResumed",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeVolumesRestored,
+					Status: metav1.ConditionTrue,
+					Reason: "VolumesSkipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeGitReverted,
+					Status: metav1.ConditionTrue,
+					Reason: "Reverted",
+				},
+				// No Reconciled - we're waiting for reconciliation
+			},
+		},
+	}
+
+	r, _ := setupRollbackTestReconciler(t, kustomization, managedApp, upgrade, rollback)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      rollback.Name,
+			Namespace: rollback.Namespace,
+		},
+	}
+
+	if err := reconcileRollbackUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.RollbackRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: rollback.Name, Namespace: rollback.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get rollback request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "ReconciliationTimeout" {
+		t.Errorf("expected reason ReconciliationTimeout, got %s", completeCond.Reason)
+	}
+}
+
+func TestRollbackRequest_HealthCheckTimeout(t *testing.T) {
+	// Test: Rollback health check times out
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionFalse, // NOT reconciled
+					Reason: "Progressing",
+				},
+			},
+		},
+	}
+
+	// ManagedApp is NOT healthy - no Ready condition
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+		// No Ready condition - health check will fail
+	}
+
+	now := metav1.Now()
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeComplete,
+					Status: metav1.ConditionFalse,
+					Reason: "HealthCheckTimeout",
+				},
+			},
+			Snapshot: &fluxupv1alpha1.SnapshotStatus{
+				CreatedAt:    &now,
+				PVCSnapshots: []fluxupv1alpha1.PVCSnapshotInfo{},
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+		},
+	}
+
+	pastTime := metav1.Time{Time: now.Add(-10 * time.Minute)} // > TimeoutHealthCheck (5m)
+
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-rollback",
+			Namespace:  "default",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-upgrade",
+			},
+		},
+		Status: fluxupv1alpha1.RollbackRequestStatus{
+			StartedAt:      &now,
+			PhaseStartedAt: &pastTime,
+			RestoredFrom: &fluxupv1alpha1.RestoredFromStatus{
+				UpgradeRequestName: "test-upgrade",
+				TargetVersion:      &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				RolledBackVersion:  &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionFalse,
+					Reason: "KustomizationResumed",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeVolumesRestored,
+					Status: metav1.ConditionTrue,
+					Reason: "VolumesSkipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeGitReverted,
+					Status: metav1.ConditionTrue,
+					Reason: "Reverted",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeReconciled,
+					Status: metav1.ConditionTrue,
+					Reason: "ReconciliationSucceeded",
+				},
+				// No Healthy - we're in health check phase
+			},
+		},
+	}
+
+	r, _ := setupRollbackTestReconciler(t, kustomization, managedApp, upgrade, rollback)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      rollback.Name,
+			Namespace: rollback.Namespace,
+		},
+	}
+
+	if err := reconcileRollbackUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.RollbackRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: rollback.Name, Namespace: rollback.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get rollback request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	// The actual reason depends on how far the rollback got -
+	// it may fail at reconciliation or health check stage
+	if completeCond.Reason != "HealthCheckTimeout" && completeCond.Reason != "ReconciliationTimeout" {
+		t.Errorf("expected reason HealthCheckTimeout or ReconciliationTimeout, got %s", completeCond.Reason)
+	}
+}
+
+func TestRollbackRequest_GitRevertFailure(t *testing.T) {
+	// Test: Git revert fails
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: true,
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+	}
+
+	now := metav1.Now()
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeComplete,
+					Status: metav1.ConditionFalse,
+					Reason: "HealthCheckTimeout",
+				},
+			},
+			Snapshot: &fluxupv1alpha1.SnapshotStatus{
+				CreatedAt:    &now,
+				PVCSnapshots: []fluxupv1alpha1.PVCSnapshotInfo{},
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+		},
+	}
+
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-rollback",
+			Namespace:  "default",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-upgrade",
+			},
+		},
+		Status: fluxupv1alpha1.RollbackRequestStatus{
+			StartedAt: &now,
+			RestoredFrom: &fluxupv1alpha1.RestoredFromStatus{
+				UpgradeRequestName: "test-upgrade",
+				TargetVersion:      &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				RolledBackVersion:  &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionTrue,
+					Reason: "KustomizationSuspended",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeVolumesRestored,
+					Status: metav1.ConditionTrue,
+					Reason: "VolumesSkipped",
+				},
+				// No GitReverted - we're in git revert phase
+			},
+		},
+	}
+
+	r, mockGit := setupRollbackTestReconciler(t, kustomization, managedApp, upgrade, rollback)
+
+	// Make Git commit fail
+	mockGit.CommitFileErr = fmt.Errorf("simulated git commit failure")
+
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      rollback.Name,
+			Namespace: rollback.Namespace,
+		},
+	}
+
+	if err := reconcileRollbackUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.RollbackRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: rollback.Name, Namespace: rollback.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get rollback request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	// The controller uses "GitCommitFailed" for Git operations (same reason for revert)
+	if completeCond.Reason != "GitRevertFailed" && completeCond.Reason != "GitCommitFailed" {
+		t.Errorf("expected reason GitRevertFailed or GitCommitFailed, got %s", completeCond.Reason)
+	}
+}
+
+func TestRollbackRequest_FluxResumedExternally(t *testing.T) {
+	// Test: Flux is externally resumed during rollback (before Git revert)
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false, // Unexpectedly resumed!
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+	}
+
+	now := metav1.Now()
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeComplete,
+					Status: metav1.ConditionFalse,
+					Reason: "HealthCheckTimeout",
+				},
+			},
+			Snapshot: &fluxupv1alpha1.SnapshotStatus{
+				CreatedAt:    &now,
+				PVCSnapshots: []fluxupv1alpha1.PVCSnapshotInfo{},
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+		},
+	}
+
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-rollback",
+			Namespace:  "default",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-upgrade",
+			},
+		},
+		Status: fluxupv1alpha1.RollbackRequestStatus{
+			StartedAt: &now,
+			RestoredFrom: &fluxupv1alpha1.RestoredFromStatus{
+				UpgradeRequestName: "test-upgrade",
+				TargetVersion:      &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				RolledBackVersion:  &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionTrue, // We think it's suspended
+					Reason: "KustomizationSuspended",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeVolumesRestored,
+					Status: metav1.ConditionTrue,
+					Reason: "VolumesSkipped",
+				},
+				// About to revert Git - but Kustomization was externally resumed
+			},
+		},
+	}
+
+	r, _ := setupRollbackTestReconciler(t, kustomization, managedApp, upgrade, rollback)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      rollback.Name,
+			Namespace: rollback.Namespace,
+		},
+	}
+
+	if err := reconcileRollbackUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.RollbackRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: rollback.Name, Namespace: rollback.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get rollback request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+
+	// Should indicate the external resume was detected
+	if !containsStr(completeCond.Message, "un-suspended externally") {
+		t.Errorf("expected message about external un-suspend, got: %s", completeCond.Message)
+	}
+}
+
+func TestRollbackRequest_CompleteSuccessfully(t *testing.T) {
+	// Test: Full rollback completes successfully
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+					Reason: "ReconciliationSucceeded",
+				},
+			},
+		},
+	}
+
+	// ManagedApp is healthy (after rollback)
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeReady,
+					Status: metav1.ConditionTrue,
+					Reason: "WorkloadHealthy",
+				},
+			},
+		},
+	}
+
+	now := metav1.Now()
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeComplete,
+					Status: metav1.ConditionFalse,
+					Reason: "HealthCheckTimeout",
+				},
+			},
+			Snapshot: &fluxupv1alpha1.SnapshotStatus{
+				CreatedAt:    &now,
+				PVCSnapshots: []fluxupv1alpha1.PVCSnapshotInfo{},
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+		},
+	}
+
+	// Rollback at final health check stage
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-rollback",
+			Namespace:  "default",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-upgrade",
+			},
+		},
+		Status: fluxupv1alpha1.RollbackRequestStatus{
+			StartedAt: &now,
+			RestoredFrom: &fluxupv1alpha1.RestoredFromStatus{
+				UpgradeRequestName: "test-upgrade",
+				TargetVersion:      &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				RolledBackVersion:  &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+			GitRevert: &fluxupv1alpha1.GitRevertStatus{
+				CommitSHA: "mock-sha-1",
+			},
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionFalse,
+					Reason: "KustomizationResumed",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeVolumesRestored,
+					Status: metav1.ConditionTrue,
+					Reason: "VolumesSkipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeGitReverted,
+					Status: metav1.ConditionTrue,
+					Reason: "Reverted",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeReconciled,
+					Status: metav1.ConditionTrue,
+					Reason: "ReconciliationSucceeded",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeHealthy,
+					Status: metav1.ConditionTrue,
+					Reason: "HealthCheckPassed",
+				},
+			},
+		},
+	}
+
+	r, _ := setupRollbackTestReconciler(t, kustomization, managedApp, upgrade, rollback)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      rollback.Name,
+			Namespace: rollback.Namespace,
+		},
+	}
+
+	if err := reconcileRollbackUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.RollbackRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: rollback.Name, Namespace: rollback.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get rollback request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionTrue {
+		t.Errorf("expected Complete=True, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "RollbackSucceeded" {
+		t.Errorf("expected reason RollbackSucceeded, got %s", completeCond.Reason)
+	}
+
+	// Finalizer should be removed
+	if len(result.Finalizers) > 0 {
+		t.Errorf("expected finalizer to be removed, got %v", result.Finalizers)
+	}
+
+	// Verify CompletedAt is set
+	if result.Status.CompletedAt == nil {
+		t.Error("expected CompletedAt to be set after successful rollback")
 	}
 }

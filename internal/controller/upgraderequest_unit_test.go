@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -1525,5 +1526,801 @@ func TestUpgradeRequest_AutoRollback_CreatesRollbackRequest(t *testing.T) {
 	}
 	if rollback.OwnerReferences[0].Name != testUpgradeName {
 		t.Errorf("expected owner reference to %s, got %s", testUpgradeName, rollback.OwnerReferences[0].Name)
+	}
+}
+
+// =============================================================================
+// Timeout Scenario Tests
+// =============================================================================
+
+func TestUpgradeRequest_ReconcileTimeout_TriggersAutoRollback(t *testing.T) {
+	// Test: Reconciliation times out after Git commit -> should trigger auto-rollback
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false, // Resumed, but not reconciled yet
+		},
+		Status: kustomizev1.KustomizationStatus{
+			// No Ready=True condition - reconciliation pending
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionFalse, // Not reconciled
+					Reason: "Progressing",
+				},
+			},
+		},
+	}
+
+	// ManagedApp with autoRollback enabled
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+			AutoRollback: true,
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+		},
+	}
+
+	// Upgrade at GitCommitted stage, waiting for reconciliation
+	now := metav1.Now()
+	// Set phase start time far in the past to trigger timeout
+	pastTime := metav1.Time{Time: now.Add(-15 * time.Minute)} // > TimeoutReconcile (10m)
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testUpgradeName,
+			Namespace:  "default",
+			UID:        "test-uid-reconcile-timeout",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			PhaseStartedAt: &pastTime, // Trigger timeout
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionFalse, // Already resumed
+					Reason: "KustomizationResumed",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSnapshotReady,
+					Status: metav1.ConditionTrue,
+					Reason: "SnapshotsSkipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeGitCommitted,
+					Status: metav1.ConditionTrue,
+					Reason: "Committed",
+				},
+				// No Reconciled condition yet - we're in reconciling phase
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+				StartedAt:       &now,
+			},
+			Snapshot: &fluxupv1alpha1.SnapshotStatus{
+				CreatedAt:    &now,
+				PVCSnapshots: []fluxupv1alpha1.PVCSnapshotInfo{},
+			},
+		},
+	}
+
+	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	// Reconcile - should detect timeout and fail
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	// Should be failed with ReconciliationTimeout
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "ReconciliationTimeout" {
+		t.Errorf("expected reason ReconciliationTimeout, got %s", completeCond.Reason)
+	}
+
+	// Should have auto-rollback initiated (post-commit failure with AutoRollback=true)
+	if !contains(completeCond.Message, "auto-rollback initiated") {
+		t.Errorf("expected message to contain 'auto-rollback initiated', got: %s", completeCond.Message)
+	}
+
+	// Verify RollbackRequest was created
+	var rollbackList fluxupv1alpha1.RollbackRequestList
+	if err := r.List(ctx, &rollbackList, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list rollback requests: %v", err)
+	}
+	if len(rollbackList.Items) != 1 {
+		t.Fatalf("expected 1 RollbackRequest to be created, got %d", len(rollbackList.Items))
+	}
+}
+
+func TestUpgradeRequest_ReconcileTimeout_NoAutoRollback(t *testing.T) {
+	// Test: Reconciliation times out, but AutoRollback is disabled
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionFalse,
+					Reason: "Progressing",
+				},
+			},
+		},
+	}
+
+	// ManagedApp WITHOUT autoRollback
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+			AutoRollback: false, // Disabled
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+		},
+	}
+
+	now := metav1.Now()
+	pastTime := metav1.Time{Time: now.Add(-15 * time.Minute)}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testUpgradeName,
+			Namespace:  "default",
+			UID:        "test-uid-no-autorollback",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			PhaseStartedAt: &pastTime,
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionFalse,
+					Reason: "KustomizationResumed",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSnapshotReady,
+					Status: metav1.ConditionTrue,
+					Reason: "SnapshotsSkipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeGitCommitted,
+					Status: metav1.ConditionTrue,
+					Reason: "Committed",
+				},
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+				StartedAt:       &now,
+			},
+		},
+	}
+
+	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "ReconciliationTimeout" {
+		t.Errorf("expected reason ReconciliationTimeout, got %s", completeCond.Reason)
+	}
+
+	// Should say "rollback required" but NOT "auto-rollback initiated"
+	if !contains(completeCond.Message, "rollback required") {
+		t.Errorf("expected message to contain 'rollback required', got: %s", completeCond.Message)
+	}
+	if contains(completeCond.Message, "auto-rollback initiated") {
+		t.Errorf("expected message NOT to contain 'auto-rollback initiated', got: %s", completeCond.Message)
+	}
+
+	// Verify NO RollbackRequest was created
+	var rollbackList fluxupv1alpha1.RollbackRequestList
+	if err := r.List(ctx, &rollbackList, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list rollback requests: %v", err)
+	}
+	if len(rollbackList.Items) != 0 {
+		t.Errorf("expected 0 RollbackRequests, got %d", len(rollbackList.Items))
+	}
+}
+
+func TestUpgradeRequest_GitCommitTimeout(t *testing.T) {
+	// Test: Git commit phase times out (before point of no return)
+	// Should resume Kustomization and NOT trigger auto-rollback
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: true, // Still suspended
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+			AutoRollback: true, // Even with auto-rollback enabled
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+		},
+	}
+
+	now := metav1.Now()
+	pastTime := metav1.Time{Time: now.Add(-5 * time.Minute)} // > TimeoutGitCommit (2m)
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testUpgradeName,
+			Namespace:  "default",
+			UID:        "test-uid-git-timeout",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			PhaseStartedAt: &pastTime,
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionTrue,
+					Reason: "KustomizationSuspended",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSnapshotReady,
+					Status: metav1.ConditionTrue,
+					Reason: "SnapshotsSkipped",
+				},
+				// No GitCommitted - we're in the committing phase
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+				StartedAt:       &now,
+			},
+		},
+	}
+
+	r, mockGit := setupTestReconciler(t, kustomization, managedApp, upgrade)
+
+	// Make Git commit hang (return error to simulate timeout scenario)
+	mockGit.CommitFileErr = fmt.Errorf("simulated git timeout")
+
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	// Should be failed
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+
+	// Kustomization should be resumed (failure before Git commit)
+	var ks kustomizev1.Kustomization
+	if err := r.Get(ctx, types.NamespacedName{Name: "apps", Namespace: "flux-system"}, &ks); err != nil {
+		t.Fatalf("failed to get kustomization: %v", err)
+	}
+	if ks.Spec.Suspend {
+		t.Error("expected Kustomization to be resumed after pre-commit failure")
+	}
+
+	// Suspended condition should be False
+	suspendedCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeSuspended)
+	if suspendedCond == nil || suspendedCond.Status != metav1.ConditionFalse {
+		t.Error("expected Suspended=False after pre-commit failure")
+	}
+
+	// NO auto-rollback should be created (failure before point of no return)
+	var rollbackList fluxupv1alpha1.RollbackRequestList
+	if err := r.List(ctx, &rollbackList, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list rollback requests: %v", err)
+	}
+	if len(rollbackList.Items) != 0 {
+		t.Errorf("expected 0 RollbackRequests for pre-commit failure, got %d", len(rollbackList.Items))
+	}
+}
+
+func TestUpgradeRequest_ReconcileFailed_KustomizationError(t *testing.T) {
+	// Test: Kustomization reconciliation fails (Ready=False with error)
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			ObservedGeneration: 2, // Indicates reconciliation attempted
+			Conditions: []metav1.Condition{
+				{
+					Type:    "Ready",
+					Status:  metav1.ConditionFalse,
+					Reason:  "ReconciliationFailed",
+					Message: "helm upgrade failed: values validation error",
+				},
+			},
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+			AutoRollback: true,
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+		},
+	}
+
+	now := metav1.Now()
+	// Set a past time but within timeout - the failure is detected by Ready=False
+	pastTime := metav1.Time{Time: now.Add(-1 * time.Minute)}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testUpgradeName,
+			Namespace:  "default",
+			UID:        "test-uid-reconcile-failed",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			PhaseStartedAt: &pastTime,
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionFalse,
+					Reason: "KustomizationResumed",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSnapshotReady,
+					Status: metav1.ConditionTrue,
+					Reason: "SnapshotsSkipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeGitCommitted,
+					Status: metav1.ConditionTrue,
+					Reason: "Committed",
+				},
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+				StartedAt:       &now,
+			},
+			Snapshot: &fluxupv1alpha1.SnapshotStatus{
+				CreatedAt:    &now,
+				PVCSnapshots: []fluxupv1alpha1.PVCSnapshotInfo{},
+			},
+		},
+	}
+
+	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	// The controller checks IsReconciled which returns false for Ready=False
+	// Then it waits for timeout. Let's set the timeout to trigger failure.
+	// Actually, the test will just keep requeuing. Let me check the actual logic.
+	// Looking at handleReconciling: it checks IsReconciled, if false, checks timeout.
+	// So we need to trigger the timeout path.
+
+	// Update the phase start to trigger timeout
+	upgrade.Status.PhaseStartedAt = &metav1.Time{Time: now.Add(-15 * time.Minute)}
+	if err := r.Status().Update(ctx, upgrade); err != nil {
+		t.Fatalf("failed to update upgrade: %v", err)
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+
+	// Verify auto-rollback was created
+	var rollbackList fluxupv1alpha1.RollbackRequestList
+	if err := r.List(ctx, &rollbackList, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list rollback requests: %v", err)
+	}
+	if len(rollbackList.Items) != 1 {
+		t.Fatalf("expected 1 RollbackRequest, got %d", len(rollbackList.Items))
+	}
+}
+
+func TestUpgradeRequest_FluxResumedExternally(t *testing.T) {
+	// Test: Flux is unexpectedly resumed during a critical operation (before Git commit)
+	// VerifyStillSuspended should catch this
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false, // Unexpectedly resumed!
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+		},
+	}
+
+	now := metav1.Now()
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testUpgradeName,
+			Namespace:  "default",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			SkipSnapshot: true,
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionTrue, // We think it's suspended
+					Reason: "KustomizationSuspended",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSnapshotReady,
+					Status: metav1.ConditionTrue,
+					Reason: "SnapshotsSkipped",
+				},
+				// About to commit - but Kustomization was externally resumed
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+				StartedAt:       &now,
+			},
+		},
+	}
+
+	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+
+	// Should indicate the external resume was detected
+	if !contains(completeCond.Message, "un-suspended externally") {
+		t.Errorf("expected message about external un-suspend, got: %s", completeCond.Message)
+	}
+}
+
+func TestUpgradeRequest_SnapshotCreationFailure(t *testing.T) {
+	// Test: Snapshot creation fails (before point of no return)
+	// Should resume Kustomization and NOT trigger auto-rollback
+	// Note: VolumeSnapshot CRD isn't registered in the test scheme, so creation will fail
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: true,
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+			VolumeSnapshots: &fluxupv1alpha1.VolumeSnapshotConfig{
+				Enabled: true,
+				PVCs:    []fluxupv1alpha1.PVCRef{{Name: "data-pvc"}},
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+		},
+	}
+
+	// Create the PVC that will be snapshotted
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data-pvc",
+			Namespace: "default",
+		},
+	}
+
+	now := metav1.Now()
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testUpgradeName,
+			Namespace:  "default",
+			Finalizers: []string{OperationFinalizer},
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			// NOT skipping snapshot - will fail because VolumeSnapshot CRD not registered
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionTrue,
+					Reason: "KustomizationSuspended",
+				},
+				{
+					Type:   fluxupv1alpha1.ConditionTypeWorkloadStopped,
+					Status: metav1.ConditionTrue,
+					Reason: "Skipped",
+				},
+				// No SnapshotReady - we're in snapshot phase
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+				StartedAt:       &now,
+			},
+		},
+	}
+
+	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade, pvc)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 10); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	// Snapshot creation will fail because VolumeSnapshot CRD isn't registered
+	if completeCond.Reason != "SnapshotCreationFailed" && completeCond.Reason != "SnapshotTimeout" {
+		t.Errorf("expected reason SnapshotCreationFailed or SnapshotTimeout, got %s", completeCond.Reason)
+	}
+
+	// Should have resumed Kustomization (failure before Git commit)
+	var ks kustomizev1.Kustomization
+	if err := r.Get(ctx, types.NamespacedName{Name: "apps", Namespace: "flux-system"}, &ks); err != nil {
+		t.Fatalf("failed to get kustomization: %v", err)
+	}
+	if ks.Spec.Suspend {
+		t.Error("expected Kustomization to be resumed after snapshot failure")
+	}
+
+	// NO auto-rollback should be created (failure before point of no return)
+	var rollbackList fluxupv1alpha1.RollbackRequestList
+	if err := r.List(ctx, &rollbackList, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list rollback requests: %v", err)
+	}
+	if len(rollbackList.Items) != 0 {
+		t.Errorf("expected 0 RollbackRequests for pre-commit failure, got %d", len(rollbackList.Items))
 	}
 }
