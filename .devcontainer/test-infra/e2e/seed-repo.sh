@@ -21,9 +21,9 @@ GITEA_POD=$(kubectl -n "${GITEA_NAMESPACE}" get pod -l app=gitea -o jsonpath='{.
 
 echo "==> Creating repository ${GITEA_OWNER}/${GITEA_REPO}..."
 
-# Create repo via gitea CLI in the pod
+# Create repo via gitea CLI in the pod (must run as git user)
 kubectl -n "${GITEA_NAMESPACE}" exec "${GITEA_POD}" -- \
-    gitea admin repo create \
+    su-exec git gitea admin repo create \
     --owner "${GITEA_OWNER}" \
     --name "${GITEA_REPO}" \
     --private false 2>/dev/null || echo "Repository may already exist"
@@ -64,7 +64,7 @@ set -e
 cd /tmp
 rm -rf repo-init
 mkdir repo-init && cd repo-init
-git init
+git init -b main
 git config user.email 'fluxup@test.local'
 git config user.name 'FluxUp E2E'
 
