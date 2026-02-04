@@ -32,6 +32,10 @@ import (
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
 )
 
+const (
+	testSnapshotName = "test-snapshot"
+)
+
 func TestManager_CreateSnapshot(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
@@ -66,7 +70,7 @@ func TestManager_CreateSnapshot(t *testing.T) {
 	req := SnapshotRequest{
 		PVCName:                 "test-pvc",
 		PVCNamespace:            "default",
-		SnapshotName:            "test-snapshot",
+		SnapshotName:            testSnapshotName,
 		VolumeSnapshotClassName: "csi-snapclass",
 		Labels: map[string]string{
 			"app": "test",
@@ -78,13 +82,13 @@ func TestManager_CreateSnapshot(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if snapshot.Name != "test-snapshot" {
+	if snapshot.Name != testSnapshotName {
 		t.Errorf("expected snapshot name test-snapshot, got %s", snapshot.Name)
 	}
 
 	// Verify snapshot was created
 	var result snapshotv1.VolumeSnapshot
-	err = client.Get(ctx, types.NamespacedName{Name: "test-snapshot", Namespace: "default"}, &result)
+	err = client.Get(ctx, types.NamespacedName{Name: testSnapshotName, Namespace: "default"}, &result)
 	if err != nil {
 		t.Fatalf("failed to get snapshot: %v", err)
 	}
@@ -113,7 +117,7 @@ func TestManager_CreateSnapshot_PVCNotFound(t *testing.T) {
 	req := SnapshotRequest{
 		PVCName:      "nonexistent-pvc",
 		PVCNamespace: "default",
-		SnapshotName: "test-snapshot",
+		SnapshotName: testSnapshotName,
 	}
 
 	_, err := manager.CreateSnapshot(ctx, req)
@@ -152,7 +156,7 @@ func TestManager_IsSnapshotReady(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			snapshot := &snapshotv1.VolumeSnapshot{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-snapshot",
+					Name:      testSnapshotName,
 					Namespace: "default",
 				},
 			}
@@ -171,7 +175,7 @@ func TestManager_IsSnapshotReady(t *testing.T) {
 			manager := NewManager(client)
 			ctx := context.Background()
 
-			ready, err := manager.IsSnapshotReady(ctx, "test-snapshot", "default")
+			ready, err := manager.IsSnapshotReady(ctx, testSnapshotName, "default")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -255,7 +259,7 @@ func TestManager_DeleteSnapshot(t *testing.T) {
 
 	snapshot := &snapshotv1.VolumeSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-snapshot",
+			Name:      testSnapshotName,
 			Namespace: "default",
 		},
 	}
@@ -268,14 +272,14 @@ func TestManager_DeleteSnapshot(t *testing.T) {
 	manager := NewManager(client)
 	ctx := context.Background()
 
-	err := manager.DeleteSnapshot(ctx, "test-snapshot", "default")
+	err := manager.DeleteSnapshot(ctx, testSnapshotName, "default")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// Verify snapshot was deleted
 	var result snapshotv1.VolumeSnapshot
-	err = client.Get(ctx, types.NamespacedName{Name: "test-snapshot", Namespace: "default"}, &result)
+	err = client.Get(ctx, types.NamespacedName{Name: testSnapshotName, Namespace: "default"}, &result)
 	if err == nil {
 		t.Error("expected snapshot to be deleted")
 	}
@@ -487,7 +491,7 @@ func TestManager_DeleteSnapshot_OrphanedSnapshot(t *testing.T) {
 	// Snapshot with finalizer that would prevent immediate deletion
 	snapshot := &snapshotv1.VolumeSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       "test-snapshot",
+			Name:       testSnapshotName,
 			Namespace:  "default",
 			Finalizers: []string{"snapshot.storage.kubernetes.io/volumesnapshot-as-source-protection"},
 		},
@@ -502,7 +506,7 @@ func TestManager_DeleteSnapshot_OrphanedSnapshot(t *testing.T) {
 	ctx := context.Background()
 
 	// Delete should not fail even with finalizer present
-	err := manager.DeleteSnapshot(ctx, "test-snapshot", "default")
+	err := manager.DeleteSnapshot(ctx, testSnapshotName, "default")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -649,7 +653,7 @@ func TestManager_RestorePVCFromSnapshot_BasicFlow(t *testing.T) {
 	restoreSize := resource.MustParse("10Gi")
 	snapshot := &snapshotv1.VolumeSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-snapshot",
+			Name:      testSnapshotName,
 			Namespace: "default",
 		},
 		Status: &snapshotv1.VolumeSnapshotStatus{
@@ -667,7 +671,7 @@ func TestManager_RestorePVCFromSnapshot_BasicFlow(t *testing.T) {
 	ctx := context.Background()
 
 	req := RestoreRequest{
-		SnapshotName:      "test-snapshot",
+		SnapshotName:      testSnapshotName,
 		SnapshotNamespace: "default",
 		NewPVCName:        "test-pvc",
 		NewPVCNamespace:   "default",
@@ -683,7 +687,7 @@ func TestManager_RestorePVCFromSnapshot_BasicFlow(t *testing.T) {
 		t.Fatal("expected PVC to have data source")
 	}
 
-	if pvc.Spec.DataSource.Name != "test-snapshot" {
+	if pvc.Spec.DataSource.Name != testSnapshotName {
 		t.Errorf("expected data source snapshot test-snapshot, got %s", pvc.Spec.DataSource.Name)
 	}
 
@@ -728,7 +732,7 @@ func TestManager_RestorePVCFromSnapshot_SnapshotNotReady(t *testing.T) {
 
 	snapshot := &snapshotv1.VolumeSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-snapshot",
+			Name:      testSnapshotName,
 			Namespace: "default",
 		},
 		Status: &snapshotv1.VolumeSnapshotStatus{
@@ -745,7 +749,7 @@ func TestManager_RestorePVCFromSnapshot_SnapshotNotReady(t *testing.T) {
 	ctx := context.Background()
 
 	req := RestoreRequest{
-		SnapshotName:      "test-snapshot",
+		SnapshotName:      testSnapshotName,
 		SnapshotNamespace: "default",
 		NewPVCName:        "test-pvc",
 		NewPVCNamespace:   "default",
