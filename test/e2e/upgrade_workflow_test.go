@@ -1,5 +1,4 @@
 //go:build e2e
-// +build e2e
 
 /*
 Copyright 2026.
@@ -32,47 +31,96 @@ import (
 	"github.com/nbenn/fluxup/test/utils"
 )
 
-// These tests require E2E_FULL=true and the full infrastructure (Flux + Gitea)
-var _ = Describe("Upgrade Workflow", Ordered, Label("full"), func() {
-	// Skip if not running full e2e tests
-	BeforeAll(func() {
-		if os.Getenv("E2E_FULL") != "true" {
-			Skip("Skipping full e2e tests (E2E_FULL != true)")
-		}
-	})
+const (
+	namespace       = "fluxup-system"
+	testNamespace   = "e2e-upgrade-test"
+	managedAppName  = "test-app"
+	fluxSystemNS    = "flux-system"
+	giteaNamespace  = "gitea"
+)
 
-	const (
-		testNamespace   = "e2e-upgrade-test"
-		managedAppName  = "test-app"
-		fluxSystemNS    = "flux-system"
-		giteaNamespace  = "gitea"
-	)
+var _ = Describe("Upgrade Workflow", Ordered, func() {
+	var controllerPodName string
 
 	BeforeAll(func() {
-		By("creating test namespace")
-		cmd := exec.Command("kubectl", "create", "namespace", testNamespace)
-		_, _ = utils.Run(cmd) // Ignore error if exists
+		By("creating manager namespace")
+		cmd := exec.Command("kubectl", "create", "ns", namespace)
+		_, _ = utils.Run(cmd) // Ignore if exists
 
-		By("verifying Flux is installed")
-		cmd = exec.Command("kubectl", "get", "deployment", "source-controller", "-n", fluxSystemNS)
+		By("labeling the namespace to enforce the restricted security policy")
+		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
+			"pod-security.kubernetes.io/enforce=restricted")
 		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Flux source-controller not found - run 'make test-e2e-setup-infra' first")
+		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying Gitea is running")
-		cmd = exec.Command("kubectl", "get", "deployment", "gitea", "-n", giteaNamespace)
+		By("installing CRDs")
+		cmd = exec.Command("make", "install")
 		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Gitea not found - run 'make test-e2e-setup-infra' first")
+		Expect(err).NotTo(HaveOccurred())
+
+		By("deploying the controller-manager")
+		deployTarget := "deploy"
+		if os.Getenv("DEPLOY_COVERAGE") == "true" {
+			deployTarget = "deploy-cover"
+		}
+		cmd = exec.Command("make", deployTarget, fmt.Sprintf("IMG=%s", managerImage))
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for controller to be ready")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+				"-n", namespace, "-o", "jsonpath={.items[0].status.phase}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(Equal("Running"))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+		// Store pod name for debugging
+		cmd = exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+			"-n", namespace, "-o", "jsonpath={.items[0].metadata.name}")
+		controllerPodName, _ = utils.Run(cmd)
+
+		By("creating test namespace")
+		cmd = exec.Command("kubectl", "create", "namespace", testNamespace)
+		_, _ = utils.Run(cmd)
 	})
 
 	AfterAll(func() {
+		if os.Getenv("DEPLOY_COVERAGE") == "true" {
+			By("skipping cleanup - coverage mode enabled")
+			return
+		}
+
 		By("cleaning up test namespace")
 		cmd := exec.Command("kubectl", "delete", "namespace", testNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
+
+		By("undeploying the controller-manager")
+		cmd = exec.Command("make", "undeploy")
+		_, _ = utils.Run(cmd)
+
+		By("uninstalling CRDs")
+		cmd = exec.Command("make", "uninstall")
+		_, _ = utils.Run(cmd)
+
+		By("removing manager namespace")
+		cmd = exec.Command("kubectl", "delete", "ns", namespace)
+		_, _ = utils.Run(cmd)
+	})
+
+	AfterEach(func() {
+		if CurrentSpecReport().Failed() {
+			By("Fetching controller logs for debugging")
+			cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
+			logs, _ := utils.Run(cmd)
+			GinkgoWriter.Printf("Controller logs:\n%s\n", logs)
+		}
 	})
 
 	Context("with Flux GitRepository", func() {
 		const (
-			gitRepoName      = "flux-test-repo"
+			gitRepoName       = "flux-test-repo"
 			kustomizationName = "e2e-apps"
 		)
 
@@ -94,7 +142,7 @@ spec:
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(gitRepoYAML)
 			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create GitRepository")
+			Expect(err).NotTo(HaveOccurred())
 
 			By("waiting for GitRepository to be ready")
 			Eventually(func(g Gomega) {
@@ -102,7 +150,7 @@ spec:
 					"-n", fluxSystemNS, "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("True"), "GitRepository not ready")
+				g.Expect(output).To(Equal("True"))
 			}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
 			By("creating Kustomization for the test app")
@@ -125,7 +173,7 @@ spec:
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(kustomizationYAML)
 			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create Kustomization")
+			Expect(err).NotTo(HaveOccurred())
 
 			By("waiting for Kustomization to be ready")
 			Eventually(func(g Gomega) {
@@ -133,7 +181,7 @@ spec:
 					"-n", fluxSystemNS, "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("True"), "Kustomization not ready")
+				g.Expect(output).To(Equal("True"))
 			}, 3*time.Minute, 5*time.Second).Should(Succeed())
 		})
 
@@ -165,7 +213,7 @@ spec:
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(managedAppYAML)
 			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ManagedApp")
+			Expect(err).NotTo(HaveOccurred())
 
 			By("verifying the ManagedApp was created")
 			Eventually(func(g Gomega) {
@@ -195,7 +243,7 @@ spec:
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(upgradeYAML)
 			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create dry-run UpgradeRequest")
+			Expect(err).NotTo(HaveOccurred())
 
 			By("waiting for dry-run to complete")
 			Eventually(func(g Gomega) {
@@ -203,7 +251,7 @@ spec:
 					"-n", testNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("True"), "UpgradeRequest not complete")
+				g.Expect(output).To(Equal("True"))
 			}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
 			By("verifying dry-run succeeded")
@@ -211,7 +259,7 @@ spec:
 				"-n", testNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("DryRunSucceeded"), "Expected DryRunSucceeded reason")
+			Expect(output).To(Equal("DryRunSucceeded"))
 		})
 
 		It("should perform a real upgrade", func() {
@@ -233,7 +281,7 @@ spec:
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(upgradeYAML)
 			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create UpgradeRequest")
+			Expect(err).NotTo(HaveOccurred())
 
 			By("waiting for upgrade to complete")
 			Eventually(func(g Gomega) {
@@ -241,8 +289,7 @@ spec:
 					"-n", testNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				// Complete condition should be set (True or False)
-				g.Expect(output).NotTo(BeEmpty(), "UpgradeRequest Complete condition not set")
+				g.Expect(output).NotTo(BeEmpty())
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
 			By("checking upgrade status")
@@ -250,21 +297,20 @@ spec:
 				"-n", testNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			
-			// Log the full status for debugging
+
+			// Log full status for debugging
 			cmd = exec.Command("kubectl", "get", "upgraderequest", managedAppName+"-upgrade",
 				"-n", testNamespace, "-o", "yaml")
 			fullOutput, _ := utils.Run(cmd)
 			GinkgoWriter.Printf("UpgradeRequest status:\n%s\n", fullOutput)
 
-			By("verifying Git commit was made (if upgrade succeeded)")
 			if output == "UpgradeSucceeded" {
-				// Check that the upgrade was committed to Git
+				By("verifying Git commit was made")
 				cmd = exec.Command("kubectl", "get", "upgraderequest", managedAppName+"-upgrade",
 					"-n", testNamespace, "-o", "jsonpath={.status.upgrade.gitCommit}")
 				commitSHA, err := utils.Run(cmd)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(commitSHA).NotTo(BeEmpty(), "Expected Git commit SHA")
+				Expect(commitSHA).NotTo(BeEmpty())
 			}
 		})
 	})

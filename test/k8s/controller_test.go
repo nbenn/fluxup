@@ -1,5 +1,4 @@
-//go:build e2e
-// +build e2e
+//go:build k8s
 
 /*
 Copyright 2026.
@@ -17,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e
+package k8s
 
 import (
 	"encoding/json"
@@ -49,9 +48,6 @@ const metricsRoleBindingName = "fluxup-metrics-binding"
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
-	// Before running the tests, set up the environment by creating the namespace,
-	// enforce the restricted security policy to the namespace, installing CRDs,
-	// and deploying the controller.
 	BeforeAll(func() {
 		By("creating manager namespace")
 		cmd := exec.Command("kubectl", "create", "ns", namespace)
@@ -79,9 +75,6 @@ var _ = Describe("Manager", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 	})
 
-	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
-	// and deleting the namespace.
-	// When running with coverage (DEPLOY_COVERAGE=true), skip cleanup to allow coverage extraction.
 	AfterAll(func() {
 		// Skip cleanup when running with coverage - the Makefile handles extraction and teardown
 		if os.Getenv("DEPLOY_COVERAGE") == "true" {
@@ -106,8 +99,6 @@ var _ = Describe("Manager", Ordered, func() {
 		_, _ = utils.Run(cmd)
 	})
 
-	// After each test, check for failures and collect logs, events,
-	// and pod descriptions for debugging.
 	AfterEach(func() {
 		specReport := CurrentSpecReport()
 		if specReport.Failed() {
@@ -156,7 +147,6 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should run successfully", func() {
 			By("validating that the controller-manager pod is running as expected")
 			verifyControllerUp := func(g Gomega) {
-				// Get the name of the controller-manager pod
 				cmd := exec.Command("kubectl", "get",
 					"pods", "-l", "control-plane=controller-manager",
 					"-o", "go-template={{ range .items }}"+
@@ -173,7 +163,6 @@ var _ = Describe("Manager", Ordered, func() {
 				controllerPodName = podNames[0]
 				g.Expect(controllerPodName).To(ContainSubstring("controller-manager"))
 
-				// Validate the pod's status
 				cmd = exec.Command("kubectl", "get",
 					"pods", controllerPodName, "-o", "jsonpath={.status.phase}",
 					"-n", namespace,
@@ -223,8 +212,6 @@ var _ = Describe("Manager", Ordered, func() {
 					"Metrics server not yet started")
 			}
 			Eventually(verifyMetricsServerStarted, 3*time.Minute, time.Second).Should(Succeed())
-
-			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
 			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
@@ -277,17 +264,13 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyMetricsAvailable, 2*time.Minute).Should(Succeed())
 		})
-
-		// +kubebuilder:scaffold:e2e-webhooks-checks
 	})
 
 	Context("ManagedApp CR", func() {
 		const testManagedAppName = "test-managed-app"
-		// Use default namespace for testing
 		const testNamespace = "default"
 
 		AfterEach(func() {
-			// Clean up test resources
 			cmd := exec.Command("kubectl", "delete", "managedapp", testManagedAppName,
 				"-n", testNamespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
@@ -332,13 +315,6 @@ spec:
 		})
 	})
 
-	// Note: UpgradeRequest controller tests are not included here because the
-	// UpgradeRequest controller requires Git configuration (GIT_BACKEND, GIT_REPO_URL, GIT_TOKEN)
-	// which is not available in the basic e2e test environment.
-	// UpgradeRequest functionality is covered by:
-	// - Unit tests (internal/controller/upgraderequest_controller_test.go)
-	// - Integration tests with Gitea (test/integration/)
-
 	Context("Controller Metrics", func() {
 		It("should report reconcile metrics for ManagedApp controller", func() {
 			By("checking that managedapp controller metrics are present")
@@ -349,22 +325,16 @@ spec:
 			}
 			Eventually(verifyManagedAppMetrics, 2*time.Minute).Should(Succeed())
 		})
-
-		// Note: UpgradeRequest controller metrics test is skipped because the controller
-		// requires Git configuration which is not available in the basic e2e test environment.
 	})
 })
 
-// serviceAccountToken returns a token for the specified service account in the given namespace.
-// It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
-// and parsing the resulting token from the API response.
+// serviceAccountToken returns a token for the specified service account.
 func serviceAccountToken() (string, error) {
 	const tokenRequestRawString = `{
 		"apiVersion": "authentication.k8s.io/v1",
 		"kind": "TokenRequest"
 	}`
 
-	// Temporary file to store the token request
 	secretName := fmt.Sprintf("%s-token-request", serviceAccountName)
 	tokenRequestFile := filepath.Join("/tmp", secretName)
 	err := os.WriteFile(tokenRequestFile, []byte(tokenRequestRawString), os.FileMode(0o644))
@@ -374,7 +344,6 @@ func serviceAccountToken() (string, error) {
 
 	var out string
 	verifyTokenCreation := func(g Gomega) {
-		// Execute kubectl command to create the token
 		cmd := exec.Command("kubectl", "create", "--raw", fmt.Sprintf(
 			"/api/v1/namespaces/%s/serviceaccounts/%s/token",
 			namespace,
@@ -384,7 +353,6 @@ func serviceAccountToken() (string, error) {
 		output, err := cmd.CombinedOutput()
 		g.Expect(err).NotTo(HaveOccurred())
 
-		// Parse the JSON output to extract the token
 		var token tokenRequest
 		err = json.Unmarshal(output, &token)
 		g.Expect(err).NotTo(HaveOccurred())
@@ -403,8 +371,7 @@ func getMetricsOutput() (string, error) {
 	return utils.Run(cmd)
 }
 
-// tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,
-// containing only the token field that we need to extract.
+// tokenRequest is a simplified representation of the Kubernetes TokenRequest API response.
 type tokenRequest struct {
 	Status struct {
 		Token string `json:"token"`

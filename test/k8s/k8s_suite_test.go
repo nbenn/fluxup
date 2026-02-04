@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build k8s
 
 /*
 Copyright 2026.
@@ -16,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e
+package k8s
 
 import (
 	"fmt"
@@ -32,38 +32,28 @@ import (
 
 var (
 	// managerImage is the manager image to be built and loaded for testing.
+	// Can be overridden via IMG environment variable.
 	managerImage = "example.com/fluxup:v0.0.1"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
 
 func init() {
+	// Allow overriding the manager image via environment variable
 	if img := os.Getenv("IMG"); img != "" {
 		managerImage = img
 	}
 }
 
-// TestE2E runs the full e2e test suite with Flux + Gitea.
-func TestE2E(t *testing.T) {
+// TestK8s runs the k8s test suite to validate the controller in Kind.
+func TestK8s(t *testing.T) {
 	RegisterFailHandler(Fail)
-	_, _ = fmt.Fprintf(GinkgoWriter, "Starting fluxup full e2e test suite (Flux + Gitea)\n")
-	RunSpecs(t, "E2E Suite")
+	_, _ = fmt.Fprintf(GinkgoWriter, "Starting fluxup k8s test suite\n")
+	RunSpecs(t, "K8s Suite")
 }
 
 var _ = BeforeSuite(func() {
-	// Verify Flux is installed
-	By("verifying Flux is installed")
-	cmd := exec.Command("kubectl", "get", "deployment", "source-controller", "-n", "flux-system")
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Flux not installed - run 'make test-e2e-setup-infra' first")
-
-	// Verify Gitea is installed
-	By("verifying Gitea is installed")
-	cmd = exec.Command("kubectl", "get", "deployment", "gitea", "-n", "gitea")
-	_, err = utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Gitea not installed - run 'make test-e2e-setup-infra' first")
-
-	// Build and load controller image
+	// When running with coverage, the Makefile already builds and loads the coverage image
 	if os.Getenv("DEPLOY_COVERAGE") != "true" {
 		By("building the manager image")
 		cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
@@ -84,6 +74,7 @@ var _ = AfterSuite(func() {
 	teardownCertManager()
 })
 
+// setupCertManager installs CertManager if needed for webhook tests.
 func setupCertManager() {
 	if os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true" {
 		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager installation (CERT_MANAGER_INSTALL_SKIP=true)\n")
@@ -102,6 +93,7 @@ func setupCertManager() {
 	Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install CertManager")
 }
 
+// teardownCertManager uninstalls CertManager if it was installed by this suite.
 func teardownCertManager() {
 	if !shouldCleanupCertManager {
 		_, _ = fmt.Fprintf(GinkgoWriter, "Skipping CertManager cleanup (not installed by this suite)\n")

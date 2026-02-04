@@ -81,12 +81,12 @@ KIND_CLUSTER ?= fluxup-test-e2e
 
 .PHONY: test-k8s
 test-k8s: test-k8s-up manifests generate fmt vet ## Run Kubernetes-only tests (no Flux/Gitea). Uses Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=k8s ./test/k8s/ -v -ginkgo.v
 	$(MAKE) test-k8s-down
 
 .PHONY: test-e2e
 test-e2e: test-k8s-up test-e2e-setup-infra manifests generate fmt vet ## Run full e2e tests with Flux + Gitea in Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) E2E_FULL=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
 	$(MAKE) test-k8s-down
 
 .PHONY: test-e2e-setup-infra
@@ -108,7 +108,7 @@ test-k8s-cover: test-k8s-up manifests generate fmt vet kustomize docker-build-co
 	@# Set the image in the coverage overlay
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG_COVER}
 	@# Run tests using coverage deployment
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) IMG=${IMG_COVER} DEPLOY_COVERAGE=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v || true
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) IMG=${IMG_COVER} DEPLOY_COVERAGE=true go test -tags=k8s ./test/k8s/ -v -ginkgo.v || true
 	@# Extract coverage before teardown
 	$(MAKE) test-k8s-extract-coverage
 	$(MAKE) test-k8s-down
@@ -168,7 +168,7 @@ endef
 .PHONY: test-git
 test-git: test-git-up ## Run Git integration tests (Gitea) with coverage.
 	@mkdir -p "$(COVERAGE_GIT)"
-	@bash -c 'set -a && source .devcontainer/test-infra/.env && set +a && go test -tags=integration -v ./internal/git/... -cover -covermode atomic -args -test.gocoverdir="$(COVERAGE_GIT)"'
+	@bash -c 'set -a && source .devcontainer/test-infra/.env && set +a && go test -tags=git -v ./test/git/... -cover -covermode atomic -args -test.gocoverdir="$(COVERAGE_GIT)"'
 	$(MAKE) test-git-down
 
 ##@ Test Infrastructure
