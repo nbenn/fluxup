@@ -332,3 +332,24 @@ func (s *Scaler) GetCurrentReplicas(ctx context.Context, kind, name, namespace s
 		return 0, fmt.Errorf("unsupported workload kind: %s", kind)
 	}
 }
+
+// IsScaledDown checks if a workload is scaled down (0 replicas and no pods running).
+// This is a non-blocking check for use in reconciliation loops.
+func (s *Scaler) IsScaledDown(ctx context.Context, kind, name, namespace string) (bool, error) {
+	ready, err := s.getReadyReplicas(ctx, kind, name, namespace)
+	if err != nil {
+		return false, err
+	}
+
+	if ready > 0 {
+		return false, nil
+	}
+
+	// Also verify no pods are still running/terminating
+	pods, err := s.getWorkloadPods(ctx, kind, name, namespace)
+	if err != nil {
+		return false, err
+	}
+
+	return len(pods) == 0, nil
+}

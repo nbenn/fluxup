@@ -43,11 +43,14 @@ import (
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
 	"github.com/nbenn/fluxup/internal/controller"
+	"github.com/nbenn/fluxup/internal/discovery"
 	"github.com/nbenn/fluxup/internal/flux"
 	"github.com/nbenn/fluxup/internal/git"
+	"github.com/nbenn/fluxup/internal/health"
 	"github.com/nbenn/fluxup/internal/logging"
 	"github.com/nbenn/fluxup/internal/renovate"
 	"github.com/nbenn/fluxup/internal/snapshot"
+	"github.com/nbenn/fluxup/internal/workload"
 	yamlpkg "github.com/nbenn/fluxup/internal/yaml"
 	// +kubebuilder:scaffold:imports
 )
@@ -258,8 +261,9 @@ func main() {
 	}
 
 	if err := (&controller.ManagedAppReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		HealthChecker: health.NewChecker(mgr.GetClient()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error("unable to create controller", "controller", "ManagedApp", "error", err)
 		os.Exit(1)
@@ -295,7 +299,7 @@ func main() {
 	}
 	gitToken := os.Getenv("GIT_TOKEN")
 
-	// Only setup UpgradeRequest controller if Git is configured
+	// Only setup UpgradeRequest and RollbackRequest controllers if Git is configured
 	if gitBackend != "" && gitRepoURL != "" && gitToken != "" {
 		gitConfig := git.Config{
 			Backend: gitBackend,
@@ -310,20 +314,47 @@ func main() {
 			os.Exit(1)
 		}
 
+		// Create shared components
+		snapshotMgr := snapshot.NewManager(mgr.GetClient())
+		fluxHelper := flux.NewHelper(mgr.GetClient())
+		yamlEditor := yamlpkg.NewEditor()
+		workloadScaler := workload.NewScaler(mgr.GetClient())
+		discoverer := discovery.New(mgr.GetClient())
+		healthChecker := health.NewChecker(mgr.GetClient())
+
 		if err := (&controller.UpgradeRequestReconciler{
 			Client:          mgr.GetClient(),
 			Scheme:          mgr.GetScheme(),
 			GitManager:      gitManager,
-			SnapshotManager: snapshot.NewManager(mgr.GetClient()),
-			FluxHelper:      flux.NewHelper(mgr.GetClient()),
-			YAMLEditor:      yamlpkg.NewEditor(),
+			SnapshotManager: snapshotMgr,
+			FluxHelper:      fluxHelper,
+			WorkloadScaler:  workloadScaler,
+			YAMLEditor:      yamlEditor,
+			Discoverer:      discoverer,
+			HealthChecker:   healthChecker,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error("unable to create controller", "controller", "UpgradeRequest", "error", err)
 			os.Exit(1)
 		}
 		setupLog.Info("UpgradeRequest controller enabled", "backend", gitBackend, "repo", gitRepoURL)
+
+		if err := (&controller.RollbackRequestReconciler{
+			Client:          mgr.GetClient(),
+			Scheme:          mgr.GetScheme(),
+			GitManager:      gitManager,
+			SnapshotManager: snapshotMgr,
+			FluxHelper:      fluxHelper,
+			WorkloadScaler:  workloadScaler,
+			YAMLEditor:      yamlEditor,
+			Discoverer:      discoverer,
+			HealthChecker:   healthChecker,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error("unable to create controller", "controller", "RollbackRequest", "error", err)
+			os.Exit(1)
+		}
+		setupLog.Info("RollbackRequest controller enabled")
 	} else {
-		setupLog.Info("UpgradeRequest controller disabled (Git not configured)")
+		setupLog.Info("UpgradeRequest and RollbackRequest controllers disabled (Git not configured)")
 	}
 	// +kubebuilder:scaffold:builder
 

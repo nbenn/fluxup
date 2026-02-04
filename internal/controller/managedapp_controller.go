@@ -18,28 +18,34 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	helmv2 "github.com/fluxcd/helm-controller/api/v2"
-	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
+	"github.com/nbenn/fluxup/internal/health"
 	"github.com/nbenn/fluxup/internal/logging"
 )
+
+// HealthCheckInterval is the polling interval for ManagedApp health checks.
+// Reduced from 5 minutes to 30 seconds for better dashboard freshness.
+const HealthCheckInterval = 30 * time.Second
 
 // ManagedAppReconciler reconciles a ManagedApp object
 type ManagedAppReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme        *runtime.Scheme
+	HealthChecker *health.Checker
 }
 
 // +kubebuilder:rbac:groups=fluxup.dev,resources=managedapps,verbs=get;list;watch;create;update;patch;delete
@@ -62,14 +68,20 @@ func (r *ManagedAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	logger.Info("reconciling ManagedApp", "gitPath", app.Spec.GitPath)
 
-	// 2. Check app health (currently only checks Kustomization, will be expanded in Issue 2)
-	ready, err := r.checkWorkloadHealth(ctx, &app)
+	// 2. Perform health check using shared health checker
+	result, err := r.HealthChecker.CheckHealth(ctx, &app)
 	if err != nil {
-		// Set condition: Kustomization not found, requeue with backoff
+		// Determine specific reason from error
+		reason := "HealthCheckError"
+		if errors.IsNotFound(err) && strings.Contains(err.Error(), "Flux resource") {
+			reason = "KustomizationNotFound"
+		}
+
+		// Set condition: health check error
 		meta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
 			Type:               fluxupv1alpha1.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             "KustomizationNotFound",
+			Reason:             reason,
 			Message:            err.Error(),
 			ObservedGeneration: app.Generation,
 		})
@@ -79,17 +91,24 @@ func (r *ManagedAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 
-	// 3. Update Ready condition
+	// 3. Update Ready condition based on health check result
 	status := metav1.ConditionFalse
-	reason := "KustomizationNotReady"
-	if ready {
+	reason := "NotReady"
+
+	if result.Healthy {
 		status = metav1.ConditionTrue
 		reason = "KustomizationReady"
+	} else if !result.FluxReady {
+		reason = "KustomizationNotReady"
+	} else if !result.WorkloadsReady {
+		reason = "WorkloadsNotReady"
 	}
+
 	meta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
 		Type:               fluxupv1alpha1.ConditionTypeReady,
 		Status:             status,
 		Reason:             reason,
+		Message:            result.Message,
 		ObservedGeneration: app.Generation,
 	})
 
@@ -99,45 +118,14 @@ func (r *ManagedAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// 5. Requeue after interval to re-sync
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	return ctrl.Result{RequeueAfter: HealthCheckInterval}, nil
 }
 
-// checkWorkloadHealth determines if the workload is healthy
-// TODO: Implement full health check with workload auto-discovery (Issue 2)
-func (r *ManagedAppReconciler) checkWorkloadHealth(ctx context.Context, app *fluxupv1alpha1.ManagedApp) (bool, error) {
-	// For now, just check the Kustomization is ready
-	// Full workload health checking will be implemented in Issue 2
-	return r.checkKustomizationHealth(ctx, app)
-}
-
-func (r *ManagedAppReconciler) checkKustomizationHealth(ctx context.Context, app *fluxupv1alpha1.ManagedApp) (bool, error) {
-	ref := app.Spec.KustomizationRef
-	ns := ref.Namespace
-	if ns == "" {
-		ns = DefaultFluxNamespace
-	}
-	key := types.NamespacedName{Name: ref.Name, Namespace: ns}
-
-	var ks kustomizev1.Kustomization
-	if err := r.Get(ctx, key, &ks); err != nil {
-		return false, err
-	}
-
-	for _, cond := range ks.Status.Conditions {
-		if cond.Type == "Ready" && cond.Status == metav1.ConditionTrue {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// findManagedAppsForWorkload maps workload changes back to ManagedApps
-// TODO: Update to use auto-discovered workloads instead of explicit refs (Issue 2)
-func (r *ManagedAppReconciler) findManagedAppsForWorkload(ctx context.Context, obj client.Object) []reconcile.Request {
-	// With workload auto-discovery, we can't easily map workload changes back to ManagedApps
-	// without caching the discovery results. For now, return empty - the periodic reconcile
-	// will catch workload status changes. This will be improved in Issue 2.
-	_ = obj // unused for now
+// findManagedAppsForWorkload maps workload changes back to ManagedApps.
+// With workload auto-discovery, we can't easily map workload changes back to ManagedApps
+// without caching the discovery results. For now, return empty - the periodic reconcile
+// will catch workload status changes.
+func (r *ManagedAppReconciler) findManagedAppsForWorkload(_ context.Context, _ client.Object) []reconcile.Request {
 	return nil
 }
 

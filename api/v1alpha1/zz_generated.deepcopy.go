@@ -418,6 +418,11 @@ func (in *RollbackRequestStatus) DeepCopyInto(out *RollbackRequestStatus) {
 		*out = new(RestoredFromStatus)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.Scaling != nil {
+		in, out := &in.Scaling, &out.Scaling
+		*out = new(ScalingStatus)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.VolumeRestore != nil {
 		in, out := &in.VolumeRestore, &out.VolumeRestore
 		*out = new(VolumeRestoreStatus)

@@ -51,6 +51,10 @@ type RollbackRequestStatus struct {
 	// +optional
 	RestoredFrom *RestoredFromStatus `json:"restoredFrom,omitempty"`
 
+	// Scaling information (workloads scaled down before volume restore)
+	// +optional
+	Scaling *ScalingStatus `json:"scaling,omitempty"`
+
 	// PVC restoration details
 	// +optional
 	VolumeRestore *VolumeRestoreStatus `json:"volumeRestore,omitempty"`

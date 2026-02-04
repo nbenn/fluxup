@@ -222,6 +222,35 @@ spec:
                     description: The UpgradeRequest that was rolled back
                     type: string
                 type: object
+              scaling:
+                description: Scaling information (workloads scaled down before volume
+                  restore)
+                properties:
+                  scaledDownAt:
+                    description: When scale-down completed for all workloads
+                    format: date-time
+                    type: string
+                  workloads:
+                    description: Workloads that were scaled down
+                    items:
+                      description: WorkloadScalingInfo records scaling details for
+                        a single workload
+                      properties:
+                        kind:
+                          description: Kind of the workload (Deployment, StatefulSet)
+                          type: string
+                        name:
+                          description: Name of the workload
+                          type: string
+                        namespace:
+                          description: Namespace of the workload
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    type: array
+                type: object
               startedAt:
                 description: When rollback started
                 format: date-time

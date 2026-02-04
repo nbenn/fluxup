@@ -31,8 +31,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
+	"github.com/nbenn/fluxup/internal/discovery"
 	"github.com/nbenn/fluxup/internal/flux"
 	"github.com/nbenn/fluxup/internal/git"
+	"github.com/nbenn/fluxup/internal/health"
 	"github.com/nbenn/fluxup/internal/logging"
 	"github.com/nbenn/fluxup/internal/snapshot"
 	"github.com/nbenn/fluxup/internal/workload"
@@ -51,6 +53,8 @@ type RollbackRequestReconciler struct {
 	FluxHelper      *flux.Helper
 	WorkloadScaler  *workload.Scaler
 	YAMLEditor      *yamlpkg.Editor
+	Discoverer      *discovery.Discoverer
+	HealthChecker   *health.Checker
 }
 
 // setPhaseStartIfNeeded sets PhaseStartedAt if not already set for this reconcile cycle.
@@ -315,9 +319,11 @@ func (r *RollbackRequestReconciler) handleSuspend(ctx context.Context, rollback 
 // handleStopWorkload scales workloads to 0 replicas before volume restore.
 // Returns (result, error, shouldContinue). If shouldContinue is true, no workloads
 // need scaling and the caller should continue to the next step.
-// TODO: Implement auto-discovery of workloads from PVCs (Issue 1)
 func (r *RollbackRequestReconciler) handleStopWorkload(ctx context.Context, rollback *fluxupv1alpha1.RollbackRequest) (ctrl.Result, error, bool) {
 	logger := logging.FromContext(ctx)
+
+	// Set phase start time for timeout tracking
+	r.setPhaseStartIfNeeded(rollback)
 
 	upgrade, err := r.getUpgradeRequest(ctx, rollback)
 	if err != nil {
@@ -325,26 +331,132 @@ func (r *RollbackRequestReconciler) handleStopWorkload(ctx context.Context, roll
 		return result, err, false
 	}
 
-	_, err = r.getManagedApp(ctx, upgrade)
+	app, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
 		result, err := r.setFailed(ctx, rollback, "ManagedAppNotFound", err.Error())
 		return result, err, false
 	}
 
-	// TODO: Auto-discover workloads from PVCs
-	// For now, skip scaling - will be implemented in Issue 1
-	logger.Debug("workload auto-discovery not yet implemented, skipping workload stop")
+	// Skip scaling if there are no snapshots to restore (no need to stop workloads)
+	if upgrade.Spec.SkipSnapshot || upgrade.Status.Snapshot == nil || len(upgrade.Status.Snapshot.PVCSnapshots) == 0 {
+		logger.Debug("no snapshots to restore, skipping workload stop")
+		meta.SetStatusCondition(&rollback.Status.Conditions, metav1.Condition{
+			Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
+			Status:             metav1.ConditionTrue,
+			Reason:             "NoVolumesToRestore",
+			Message:            "Workload stop skipped (no volumes to restore)",
+			ObservedGeneration: rollback.Generation,
+		})
+		if err := r.Status().Update(ctx, rollback); err != nil {
+			return ctrl.Result{}, err, false
+		}
+		return ctrl.Result{Requeue: true}, nil, true
+	}
+
+	// Get PVC names from the upgrade's snapshot list
+	pvcNames := make([]string, len(upgrade.Status.Snapshot.PVCSnapshots))
+	for i, snap := range upgrade.Status.Snapshot.PVCSnapshots {
+		pvcNames[i] = snap.PVCName
+	}
+
+	// Discover workloads that mount these PVCs
+	workloads, err := r.Discoverer.DiscoverWorkloadsForPVCs(ctx, pvcNames, app.Namespace)
+	if err != nil {
+		result, err := r.setFailed(ctx, rollback, "WorkloadDiscoveryFailed", err.Error())
+		return result, err, false
+	}
+
+	if len(workloads) == 0 {
+		logger.Debug("no workloads discovered mounting the PVCs, skipping stop")
+		meta.SetStatusCondition(&rollback.Status.Conditions, metav1.Condition{
+			Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
+			Status:             metav1.ConditionTrue,
+			Reason:             "NoWorkloadsFound",
+			Message:            "No workloads found mounting the PVCs",
+			ObservedGeneration: rollback.Generation,
+		})
+		if err := r.Status().Update(ctx, rollback); err != nil {
+			return ctrl.Result{}, err, false
+		}
+		return ctrl.Result{Requeue: true}, nil, true
+	}
+
+	logger.Info("discovered workloads for stop", "count", len(workloads))
+
+	// Scale down each workload
+	scaledWorkloads := make([]fluxupv1alpha1.WorkloadScalingInfo, 0, len(workloads))
+	for _, w := range workloads {
+		ns := w.Namespace
+		if ns == "" {
+			ns = app.Namespace
+		}
+
+		// Scale to 0 (we ignore the returned ScaleInfo since Flux handles replica restoration)
+		if _, err := r.WorkloadScaler.ScaleDown(ctx, w.Kind, w.Name, ns); err != nil {
+			result, err := r.setFailed(ctx, rollback, "ScaleDownFailed",
+				fmt.Sprintf("Failed to scale down %s/%s: %v", ns, w.Name, err))
+			return result, err, false
+		}
+
+		scaledWorkloads = append(scaledWorkloads, fluxupv1alpha1.WorkloadScalingInfo{
+			Kind:      w.Kind,
+			Name:      w.Name,
+			Namespace: ns,
+		})
+	}
+
+	// Initialize scaling status if needed
+	if rollback.Status.Scaling == nil {
+		rollback.Status.Scaling = &fluxupv1alpha1.ScalingStatus{}
+	}
+	rollback.Status.Scaling.Workloads = scaledWorkloads
+
+	// Check if all workloads are scaled down (non-blocking)
+	allScaledDown := true
+	for _, w := range scaledWorkloads {
+		scaledDown, err := r.WorkloadScaler.IsScaledDown(ctx, w.Kind, w.Name, w.Namespace)
+		if err != nil {
+			result, err := r.setFailed(ctx, rollback, "ScaleDownCheckFailed", err.Error())
+			return result, err, false
+		}
+		if !scaledDown {
+			allScaledDown = false
+			break
+		}
+	}
+
+	if !allScaledDown {
+		// Check per-phase timeout
+		if r.isPhaseTimedOut(rollback, TimeoutScaleDown) {
+			result, err := r.setFailed(ctx, rollback, "ScaleDownTimeout", "Workloads did not scale down within timeout")
+			return result, err, false
+		}
+		logger.Debug("waiting for workloads to scale down")
+		if err := r.Status().Update(ctx, rollback); err != nil {
+			return ctrl.Result{}, err, false
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, false
+	}
+
+	// All workloads scaled down - reset phase timer for next phase
+	r.resetPhaseStart(rollback)
+
+	now := metav1.Now()
+	rollback.Status.Scaling.ScaledDownAt = &now
 	meta.SetStatusCondition(&rollback.Status.Conditions, metav1.Condition{
 		Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
 		Status:             metav1.ConditionTrue,
-		Reason:             "Skipped",
-		Message:            "Workload auto-discovery not yet implemented",
+		Reason:             "WorkloadsStopped",
+		Message:            fmt.Sprintf("Scaled down %d workloads", len(scaledWorkloads)),
 		ObservedGeneration: rollback.Generation,
 	})
+
 	if err := r.Status().Update(ctx, rollback); err != nil {
 		return ctrl.Result{}, err, false
 	}
-	return ctrl.Result{Requeue: true}, nil, true
+
+	logger.Info("all workloads scaled down", "count", len(scaledWorkloads))
+	return ctrl.Result{Requeue: true}, nil, false
 }
 
 // handleVolumeRestore deletes current PVCs and creates new ones from snapshots
@@ -685,29 +797,28 @@ func (r *RollbackRequestReconciler) handleHealthChecking(ctx context.Context, ro
 		return r.setFailed(ctx, rollback, "ManagedAppNotFound", err.Error())
 	}
 
-	// Check workload health via ManagedApp Ready condition
-	healthy := false
-	for _, cond := range app.Status.Conditions {
-		if cond.Type == fluxupv1alpha1.ConditionTypeReady {
-			healthy = cond.Status == metav1.ConditionTrue
-			break
-		}
+	// Perform direct health check (real-time, authoritative)
+	// This checks both Flux resource AND workload readiness
+	healthResult, err := r.HealthChecker.CheckHealth(ctx, app)
+	if err != nil {
+		return r.setFailed(ctx, rollback, "HealthCheckError", err.Error())
 	}
 
-	if !healthy {
+	if !healthResult.Healthy {
 		// Check per-phase timeout (use configured timeout if available)
 		timeout := TimeoutHealthCheck
 		if app.Spec.HealthCheck != nil && app.Spec.HealthCheck.Timeout != "" {
-			if parsed, err := time.ParseDuration(app.Spec.HealthCheck.Timeout); err == nil {
+			if parsed, parseErr := time.ParseDuration(app.Spec.HealthCheck.Timeout); parseErr == nil {
 				timeout = parsed
 			}
 		}
 
 		if r.isPhaseTimedOut(rollback, timeout) {
-			return r.setFailed(ctx, rollback, "HealthCheckTimeout", "Workload did not become healthy within timeout")
+			return r.setFailed(ctx, rollback, "HealthCheckTimeout",
+				fmt.Sprintf("App did not become healthy within timeout: %s", healthResult.Message))
 		}
 
-		logger.Debug("workload not yet healthy, waiting")
+		logger.Debug("app not yet healthy, waiting", "message", healthResult.Message)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
@@ -718,7 +829,7 @@ func (r *RollbackRequestReconciler) handleHealthChecking(ctx context.Context, ro
 		Type:               fluxupv1alpha1.ConditionTypeHealthy,
 		Status:             metav1.ConditionTrue,
 		Reason:             "HealthCheckPassed",
-		Message:            "Workload is healthy",
+		Message:            healthResult.Message,
 		ObservedGeneration: rollback.Generation,
 	})
 

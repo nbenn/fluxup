@@ -32,8 +32,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
+	"github.com/nbenn/fluxup/internal/discovery"
 	"github.com/nbenn/fluxup/internal/flux"
 	"github.com/nbenn/fluxup/internal/git"
+	"github.com/nbenn/fluxup/internal/health"
 	"github.com/nbenn/fluxup/internal/snapshot"
 	yamlpkg "github.com/nbenn/fluxup/internal/yaml"
 )
@@ -71,6 +73,8 @@ spec:
 		SnapshotManager: snapshot.NewManager(fakeClient),
 		FluxHelper:      flux.NewHelper(fakeClient),
 		YAMLEditor:      yamlpkg.NewEditor(),
+		Discoverer:      discovery.New(fakeClient),
+		HealthChecker:   health.NewChecker(fakeClient),
 	}
 
 	return reconciler, mockGit

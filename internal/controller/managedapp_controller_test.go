@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fluxupv1alpha1 "github.com/nbenn/fluxup/api/v1alpha1"
+	"github.com/nbenn/fluxup/internal/health"
 )
 
 var _ = Describe("ManagedApp Controller", func() {
@@ -75,8 +76,9 @@ var _ = Describe("ManagedApp Controller", func() {
 		It("should set Ready=False with KustomizationNotFound reason", func() {
 			By("Reconciling the resource")
 			controllerReconciler := &ManagedAppReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:        k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				HealthChecker: health.NewChecker(k8sClient),
 			}
 
 			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -178,8 +180,9 @@ var _ = Describe("ManagedApp Controller", func() {
 		It("should set Ready=False when Kustomization is not ready", func() {
 			By("Reconciling the resource")
 			controllerReconciler := &ManagedAppReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:        k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				HealthChecker: health.NewChecker(k8sClient),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -213,8 +216,9 @@ var _ = Describe("ManagedApp Controller", func() {
 
 			By("Reconciling the resource")
 			controllerReconciler := &ManagedAppReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:        k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				HealthChecker: health.NewChecker(k8sClient),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
