@@ -171,7 +171,7 @@ endef
 .PHONY: test-git
 test-git: test-git-up ## Run Git integration tests (Gitea) with coverage.
 	@mkdir -p "$(COVERAGE_GIT)"
-	@bash -c 'set -a && source .devcontainer/test-infra/.env && set +a && go test -tags=git -v ./test/git/... -cover -covermode atomic -args -test.gocoverdir="$(COVERAGE_GIT)"'
+	@bash -c 'set -a && source .devcontainer/test-infra/.env && set +a && go test -tags=git -v ./test/git/... -cover -covermode atomic -coverpkg=./internal/git/... -args -test.gocoverdir="$(COVERAGE_GIT)"'
 	$(MAKE) test-git-down
 
 ##@ Test Infrastructure

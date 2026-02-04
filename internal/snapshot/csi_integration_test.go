@@ -1,4 +1,4 @@
-package integration
+package snapshot
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
-	"github.com/nbenn/fluxup/internal/snapshot"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -92,13 +91,13 @@ func TestSnapshotCSI_CreateSnapshot(t *testing.T) {
 
 	k8sClient := setupFakeK8sClient(t, pvc, snapshotClass)
 
-	mgr := snapshot.NewManager(k8sClient)
+	mgr := NewManager(k8sClient)
 
 	ctx := context.Background()
 	snapshotName := "test-snapshot"
 
 	// Create snapshot
-	req := snapshot.SnapshotRequest{
+	req := SnapshotRequest{
 		PVCName:                 pvc.Name,
 		PVCNamespace:            testNamespace,
 		SnapshotName:            snapshotName,
@@ -127,13 +126,13 @@ func TestSnapshotCSI_SnapshotReadiness(t *testing.T) {
 	snapshotClass := createFakeVolumeSnapshotClass()
 
 	k8sClient := setupFakeK8sClient(t, pvc, snapshotClass)
-	mgr := snapshot.NewManager(k8sClient)
+	mgr := NewManager(k8sClient)
 
 	ctx := context.Background()
 	snapshotName := "test-snapshot-ready"
 
 	// Create snapshot
-	req := snapshot.SnapshotRequest{
+	req := SnapshotRequest{
 		PVCName:                 pvc.Name,
 		PVCNamespace:            testNamespace,
 		SnapshotName:            snapshotName,
@@ -195,13 +194,13 @@ func TestSnapshotCSI_RestoreFromSnapshot(t *testing.T) {
 	}
 
 	k8sClient := setupFakeK8sClient(t, originalPVC, snapshotClass, vs)
-	mgr := snapshot.NewManager(k8sClient)
+	mgr := NewManager(k8sClient)
 
 	ctx := context.Background()
 
 	// Restore PVC from snapshot
 	restoredPVCName := "restored-pvc"
-	req := snapshot.RestoreRequest{
+	req := RestoreRequest{
 		SnapshotName:      snapshotName,
 		SnapshotNamespace: testNamespace,
 		NewPVCName:        restoredPVCName,
@@ -242,7 +241,7 @@ func TestSnapshotCSI_DeleteSnapshot(t *testing.T) {
 	}
 
 	k8sClient := setupFakeK8sClient(t, vs)
-	mgr := snapshot.NewManager(k8sClient)
+	mgr := NewManager(k8sClient)
 
 	ctx := context.Background()
 
@@ -267,18 +266,18 @@ func TestSnapshotCSI_MultipleSnapshots(t *testing.T) {
 	snapshotClass := createFakeVolumeSnapshotClass()
 
 	k8sClient := setupFakeK8sClient(t, pvc1, pvc2, snapshotClass)
-	mgr := snapshot.NewManager(k8sClient)
+	mgr := NewManager(k8sClient)
 
 	ctx := context.Background()
 
 	// Create multiple snapshots manually (or test individual creation)
-	req1 := snapshot.SnapshotRequest{
+	req1 := SnapshotRequest{
 		PVCName:                 pvc1.Name,
 		PVCNamespace:            testNamespace,
 		SnapshotName:            "multi-test-pvc-1",
 		VolumeSnapshotClassName: fakeSnapshotClassName,
 	}
-	req2 := snapshot.SnapshotRequest{
+	req2 := SnapshotRequest{
 		PVCName:                 pvc2.Name,
 		PVCNamespace:            testNamespace,
 		SnapshotName:            "multi-test-pvc-2",
@@ -323,12 +322,12 @@ func TestSnapshotCSI_SnapshotClassSelection(t *testing.T) {
 	pvc := createFakePVC("test-pvc")
 
 	k8sClient := setupFakeK8sClient(t, pvc, class1, class2)
-	mgr := snapshot.NewManager(k8sClient)
+	mgr := NewManager(k8sClient)
 
 	ctx := context.Background()
 
 	// Create snapshot with specific class
-	req := snapshot.SnapshotRequest{
+	req := SnapshotRequest{
 		PVCName:                 pvc.Name,
 		PVCNamespace:            testNamespace,
 		SnapshotName:            "test-snapshot",
@@ -352,12 +351,12 @@ func TestSnapshotCSI_PartialFailureHandling(t *testing.T) {
 	snapshotClass := createFakeVolumeSnapshotClass()
 
 	k8sClient := setupFakeK8sClient(t, pvc1, pvc2, snapshotClass)
-	mgr := snapshot.NewManager(k8sClient)
+	mgr := NewManager(k8sClient)
 
 	ctx := context.Background()
 
 	// Create first snapshot successfully
-	req1 := snapshot.SnapshotRequest{
+	req1 := SnapshotRequest{
 		PVCName:                 pvc1.Name,
 		PVCNamespace:            testNamespace,
 		SnapshotName:            "snap-1",
@@ -368,7 +367,7 @@ func TestSnapshotCSI_PartialFailureHandling(t *testing.T) {
 	assert.NotNil(t, snap1)
 
 	// Try to create second snapshot with non-existent PVC (should fail)
-	req2 := snapshot.SnapshotRequest{
+	req2 := SnapshotRequest{
 		PVCName:                 "non-existent-pvc",
 		PVCNamespace:            testNamespace,
 		SnapshotName:            "snap-2",

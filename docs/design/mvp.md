@@ -551,7 +551,7 @@ Phase 3 tests fall into two categories: **practical & valuable** vs. **expensive
 
 **Tests to implement:**
 ```
-test/integration/git_operations_test.go
+internal/git/operations_integration_test.go
 ├── TestGitConcurrentCommits - Multiple controllers committing simultaneously
 ├── TestGitMergeConflict - Detect and handle merge conflicts
 ├── TestGitLargeFileHandling - YAML files > 1MB
@@ -629,7 +629,7 @@ test/e2e/snapshot_restore_e2e_test.go
 
 #### Git Integration Tests
 
-**Location**: `test/integration/git_operations_test.go`
+**Location**: `internal/git/operations_integration_test.go`
 
 **Implemented Tests** (6 tests, 27 subtests total):
 
@@ -677,7 +677,7 @@ test/e2e/snapshot_restore_e2e_test.go
 
 #### Snapshot CSI Tests - Fake Driver
 
-**Location**: `test/integration/snapshot_csi_fake_test.go`
+**Location**: `internal/snapshot/csi_integration_test.go`
 
 **Implemented Tests** (7 tests):
 
