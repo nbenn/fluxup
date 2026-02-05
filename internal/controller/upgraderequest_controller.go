@@ -153,7 +153,10 @@ func (r *UpgradeRequestReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// 4. Determine current step from conditions and handle accordingly
-	if !meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeSuspended) {
+	// Note: We check if the Suspended condition EXISTS (not just if it's True) because
+	// the condition transitions from True (suspended) to False (resumed) during the flow.
+	// We only want to suspend once at the beginning; once the condition is set, skip this phase.
+	if meta.FindStatusCondition(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeSuspended) == nil {
 		return r.handleSuspend(ctx, &upgrade)
 	}
 
