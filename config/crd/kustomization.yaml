@@ -3,6 +3,8 @@
 # It should be run by config/default
 resources:
 - bases/fluxup.dev_managedapps.yaml
+- bases/fluxup.dev_upgraderequests.yaml
+- bases/fluxup.dev_rollbackrequests.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

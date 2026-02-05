@@ -53,12 +53,33 @@ var _ = Describe("Upgrade Workflow", Ordered, func() {
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("installing CRDs")
-		cmd = exec.Command("make", "install")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred())
+		By("configuring Git credentials for the controller")
+		// Copy the Git credentials secret from fluxup-system to our namespace
+		// The E2E setup creates it in the global fluxup-system, but since tests
+		// clean up namespaces we need to ensure it exists in our test namespace
+		cmd = exec.Command("kubectl", "get", "secret", "fluxup-git-credentials", 
+			"-n", namespace, "-o", "json")
+		_, secretErr := utils.Run(cmd)
+		if secretErr != nil {
+			// Secret doesn't exist in this namespace, try to copy from the global one
+			// or read from the .env file
+			By("reading Git token from .env file")
+			envPath := "/workspace/.devcontainer/test-infra/e2e/.env"
+			envCmd := exec.Command("bash", "-c", fmt.Sprintf("source %s && echo $GITEA_TOKEN", envPath))
+			token, tokenErr := utils.Run(envCmd)
+			if tokenErr != nil {
+				Skip("Could not read GITEA_TOKEN from .env file")
+			}
+			token = strings.TrimSpace(token)
+			
+			By("creating Git credentials secret")
+			cmd = exec.Command("kubectl", "create", "secret", "generic", "fluxup-git-credentials",
+				"-n", namespace, fmt.Sprintf("--from-literal=token=%s", token))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+		}
 
-		By("deploying the controller-manager")
+		By("deploying the controller-manager with Git configuration")
 		deployTarget := "deploy"
 		if os.Getenv("DEPLOY_COVERAGE") == "true" {
 			deployTarget = "deploy-cover"
@@ -67,7 +88,37 @@ var _ = Describe("Upgrade Workflow", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("waiting for controller to be ready")
+		By("patching controller deployment with Git environment variables")
+		gitURL := fmt.Sprintf("http://gitea.%s.svc.cluster.local:3000/fluxup/flux-test-repo.git", giteaNamespace)
+		patchJSON := fmt.Sprintf(`{
+			"spec": {
+				"template": {
+					"spec": {
+						"containers": [{
+							"name": "manager",
+							"env": [
+								{"name": "GIT_BACKEND", "value": "gitea"},
+								{"name": "GIT_REPO_URL", "value": "%s"},
+								{"name": "GIT_BRANCH", "value": "main"},
+								{"name": "GIT_TOKEN", "valueFrom": {"secretKeyRef": {"name": "fluxup-git-credentials", "key": "token"}}}
+							]
+						}]
+					}
+				}
+			}
+		}`, gitURL)
+		cmd = exec.Command("kubectl", "patch", "deployment", "fluxup-controller-manager",
+			"-n", namespace, "--type=strategic", "-p", patchJSON)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for rollout to complete")
+		cmd = exec.Command("kubectl", "rollout", "status", "deployment/fluxup-controller-manager",
+			"-n", namespace, "--timeout=5m")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for controller to be ready with Git configuration")
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
 				"-n", namespace, "-o", "jsonpath={.items[0].status.phase}")
@@ -98,10 +149,6 @@ var _ = Describe("Upgrade Workflow", Ordered, func() {
 
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
-		_, _ = utils.Run(cmd)
-
-		By("uninstalling CRDs")
-		cmd = exec.Command("make", "uninstall")
 		_, _ = utils.Run(cmd)
 
 		By("removing manager namespace")

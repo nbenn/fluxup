@@ -84,13 +84,17 @@ KIND_CLUSTER ?= fluxup-test-e2e
 
 .PHONY: test-k8s
 test-k8s: test-k8s-up manifests generate fmt vet ## Run Kubernetes-only tests (no Flux/Gitea). Uses Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=k8s ./test/k8s/ -v -ginkgo.v
-	$(MAKE) test-k8s-down
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=k8s ./test/k8s/ -v -ginkgo.v; \
+	TEST_EXIT=$$?; \
+	$(MAKE) test-k8s-down; \
+	exit $$TEST_EXIT
 
 .PHONY: test-e2e
 test-e2e: test-k8s-up test-e2e-setup-infra manifests generate fmt vet ## Run full e2e tests with Flux + Gitea in Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) test-k8s-down
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v; \
+	TEST_EXIT=$$?; \
+	$(MAKE) test-k8s-down; \
+	exit $$TEST_EXIT
 
 .PHONY: test-e2e-setup-infra
 test-e2e-setup-infra: ## Set up Flux + Gitea in Kind cluster for e2e tests.
@@ -111,10 +115,11 @@ test-k8s-cover: test-k8s-up manifests generate fmt vet kustomize docker-build-co
 	@# Set the image in the coverage overlay
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG_COVER}
 	@# Run tests using coverage deployment
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) IMG=${IMG_COVER} DEPLOY_COVERAGE=true go test -tags=k8s ./test/k8s/ -v -ginkgo.v || true
-	@# Extract coverage before teardown
-	$(MAKE) test-k8s-extract-coverage
-	$(MAKE) test-k8s-down
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) IMG=${IMG_COVER} DEPLOY_COVERAGE=true go test -tags=k8s ./test/k8s/ -v -ginkgo.v; \
+	TEST_EXIT=$$?; \
+	$(MAKE) test-k8s-extract-coverage; \
+	$(MAKE) test-k8s-down; \
+	exit $$TEST_EXIT
 
 .PHONY: test-k8s-extract-coverage
 test-k8s-extract-coverage: ## Extract coverage data from k8s test pod.
@@ -129,10 +134,11 @@ test-e2e-cover: test-k8s-up test-e2e-setup-infra manifests generate fmt vet kust
 	@# Set the image in the coverage overlay
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG_COVER}
 	@# Run tests using coverage deployment
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) IMG=${IMG_COVER} DEPLOY_COVERAGE=true E2E_FULL=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v || true
-	@# Extract coverage before teardown
-	$(MAKE) test-e2e-extract-coverage
-	$(MAKE) test-k8s-down
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) IMG=${IMG_COVER} DEPLOY_COVERAGE=true E2E_FULL=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v; \
+	TEST_EXIT=$$?; \
+	$(MAKE) test-e2e-extract-coverage; \
+	$(MAKE) test-k8s-down; \
+	exit $$TEST_EXIT
 
 .PHONY: test-e2e-extract-coverage
 test-e2e-extract-coverage: ## Extract coverage data from e2e test pod.

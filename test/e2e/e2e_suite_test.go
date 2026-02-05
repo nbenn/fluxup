@@ -78,9 +78,20 @@ var _ = BeforeSuite(func() {
 	}
 
 	setupCertManager()
+
+	// Install CRDs once for all tests
+	By("installing CRDs")
+	cmd = exec.Command("make", "install")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to install CRDs")
 })
 
 var _ = AfterSuite(func() {
+	// Uninstall CRDs
+	By("uninstalling CRDs")
+	cmd := exec.Command("make", "uninstall")
+	_, _ = utils.Run(cmd)
+
 	teardownCertManager()
 })
 

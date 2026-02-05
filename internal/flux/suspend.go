@@ -55,10 +55,10 @@ func (h *Helper) SuspendKustomization(ctx context.Context, name, namespace strin
 		return nil // Already suspended
 	}
 
-	patch := client.MergeFrom(ks.DeepCopy())
+	// Use Update instead of Patch to ensure the change is applied
 	ks.Spec.Suspend = true
 
-	if err := h.client.Patch(ctx, &ks, patch); err != nil {
+	if err := h.client.Update(ctx, &ks); err != nil {
 		return fmt.Errorf("suspending kustomization: %w", err)
 	}
 
@@ -69,28 +69,41 @@ func (h *Helper) SuspendKustomization(ctx context.Context, name, namespace strin
 // ResumeKustomization resumes a Flux Kustomization
 func (h *Helper) ResumeKustomization(ctx context.Context, name, namespace string) error {
 	logger := logging.FromContext(ctx)
-	logger.Debug("resuming Kustomization", "name", name, "namespace", namespace)
+	logger.Info("resuming Kustomization", "name", name, "namespace", namespace)
 
 	var ks kustomizev1.Kustomization
 	key := types.NamespacedName{Name: name, Namespace: namespace}
 
 	if err := h.client.Get(ctx, key, &ks); err != nil {
+		logger.Error("failed to get Kustomization for resume", "error", err, "name", name, "namespace", namespace)
 		return fmt.Errorf("getting kustomization: %w", err)
 	}
 
+	logger.Info("current Kustomization suspend state", "name", name, "suspend", ks.Spec.Suspend)
+
 	if !ks.Spec.Suspend {
-		logger.Debug("Kustomization already resumed", "name", name)
+		logger.Info("Kustomization already resumed", "name", name)
 		return nil // Already resumed
 	}
 
-	patch := client.MergeFrom(ks.DeepCopy())
+	// Use Update instead of Patch to ensure the change is applied
 	ks.Spec.Suspend = false
 
-	if err := h.client.Patch(ctx, &ks, patch); err != nil {
+	if err := h.client.Update(ctx, &ks); err != nil {
+		logger.Error("failed to update Kustomization to resume", "error", err, "name", name, "namespace", namespace)
 		return fmt.Errorf("resuming kustomization: %w", err)
 	}
 
-	logger.Info("resumed Kustomization", "name", name, "namespace", namespace)
+	logger.Info("successfully resumed Kustomization", "name", name, "namespace", namespace)
+
+	// Verify the patch worked by reading back
+	var ksVerify kustomizev1.Kustomization
+	if err := h.client.Get(ctx, key, &ksVerify); err != nil {
+		logger.Error("failed to verify Kustomization resume", "error", err)
+	} else {
+		logger.Info("verified Kustomization state after resume", "suspend", ksVerify.Spec.Suspend)
+	}
+
 	return nil
 }
 

@@ -144,7 +144,7 @@ echo "==> Creating Gitea credentials secret..."
 kubectl -n fluxup-system create namespace fluxup-system --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl -n fluxup-system create secret generic fluxup-git-credentials \
-    --from-literal=TOKEN="${TOKEN}" \
+    --from-literal=token="${TOKEN}" \
     --dry-run=client -o yaml | kubectl apply -f -
 
 # Save config

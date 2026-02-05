@@ -729,10 +729,6 @@ func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrad
 		ObservedGeneration: upgrade.Generation,
 	})
 
-	if err := r.Status().Update(ctx, upgrade); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	logger.Info("resumed Flux Kustomization, waiting for reconciliation")
 
 	// Check if reconciliation is complete (non-blocking)
@@ -751,6 +747,10 @@ func (r *UpgradeRequestReconciler) handleReconciling(ctx context.Context, upgrad
 		// Check per-phase timeout
 		if r.isPhaseTimedOut(upgrade, TimeoutReconcile) {
 			return r.setFailed(ctx, upgrade, "ReconciliationTimeout", "Kustomization did not reconcile within timeout")
+		}
+		// Update status before requeue to persist Suspended=False
+		if err := r.Status().Update(ctx, upgrade); err != nil {
+			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
@@ -853,6 +853,15 @@ func (r *UpgradeRequestReconciler) handleCompleted(ctx context.Context, upgrade 
 	}
 
 	logger.Info("upgrade complete", "newVersion", versionStr)
+
+	// Ensure Kustomization suspension is marked as resolved
+	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
+		Type:               fluxupv1alpha1.ConditionTypeSuspended,
+		Status:             metav1.ConditionFalse,
+		Reason:             "KustomizationResumed",
+		Message:            "Kustomization resumed after upgrade completion",
+		ObservedGeneration: upgrade.Generation,
+	})
 
 	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
 		Type:               fluxupv1alpha1.ConditionTypeComplete,
