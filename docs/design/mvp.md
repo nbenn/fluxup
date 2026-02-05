@@ -425,6 +425,245 @@ Rather than focusing solely on line coverage, the emphasis is on:
 
 With E2E fixes validated + async operation tests added, the project will have **strong test coverage across all critical paths** with emphasis on real-world failure scenarios.
 
+### Deployment Pattern Coverage Gap
+
+**Problem**: All E2E and controller unit tests exclusively use HelmRelease-based deployments.
+
+The project supports two fundamental Flux deployment patterns:
+1. **HelmRelease** - Helm charts managed by Flux's helm-controller
+2. **Kustomization** - Raw manifests (Deployments, StatefulSets, etc.) managed by Flux's kustomize-controller
+
+**Current State**:
+
+| Test Area | HelmRelease | Kustomization |
+|-----------|-------------|---------------|
+| Discovery unit tests | ✅ 10 tests | ✅ 7 tests |
+| PVC/workload detection | ✅ | ✅ |
+| E2E upgrade workflow | ✅ | ❌ |
+| E2E rollback workflow | ✅ | ❌ |
+| E2E failure scenarios | ✅ 10+ tests | ❌ |
+| Controller unit tests | ✅ | ❌ |
+| Version path customization | ❌ (uses default) | ❌ |
+
+All E2E tests use:
+```yaml
+gitPath: "flux/apps/gitea/helmrelease.yaml"  # Always HelmRelease
+```
+
+**Why This Matters**:
+
+For Kustomization-based deployments:
+- Version changes are in different locations (e.g., image tags in Deployment specs, kustomization overlays)
+- The `versionPath` field exists precisely to support this, but is never tested with non-default values
+- Discovery uses Kustomization inventory instead of Helm release secrets
+
+**Gaps to Address**:
+
+1. **Kustomization E2E tests** - Mirror existing E2E tests but with raw Deployment/StatefulSet manifests
+2. **Custom versionPath tests** - Test version updates at non-standard YAML paths (e.g., `.spec.template.spec.containers[0].image`)
+3. **Mixed scenario tests** - ManagedApp with both `helmReleaseRef` and `kustomizationRef` set
+4. **Comparative discovery tests** - Verify both patterns discover identical workloads/PVCs for equivalent deployments
+
+**Effort Estimate**: 2-3 days
+
+**Priority**: High - This is a fundamental feature gap, not just coverage improvement.
+
+#### Implementation Plan
+
+##### Phase 1: Test Fixtures (Day 1 morning)
+
+Add Kustomization-based test manifests to `.devcontainer/test-infra/manifests/`:
+
+```yaml
+# redis-deployment.yaml - Raw Deployment with image tag versioning
+# (Mirrors redis-helmrelease.yaml but as raw manifest for comparison testing)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-raw
+  namespace: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-raw
+  template:
+    metadata:
+      labels:
+        app: redis-raw
+    spec:
+      containers:
+      - name: redis
+        image: redis:7.2.0  # Version to be updated via versionPath
+        ports:
+        - containerPort: 6379
+```
+
+```yaml
+# redis-statefulset.yaml - StatefulSet with PVC for snapshot testing
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-persistent
+  namespace: redis
+spec:
+  serviceName: redis-persistent
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-persistent
+  template:
+    metadata:
+      labels:
+        app: redis-persistent
+    spec:
+      containers:
+      - name: redis
+        image: redis:7.2.0  # Version to be updated
+        ports:
+        - containerPort: 6379
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+```
+
+Update `.devcontainer/test-infra/e2e/seed-repo.sh` to include these manifests:
+- Add `flux/apps/redis-raw/deployment.yaml`
+- Add `flux/apps/redis-persistent/statefulset.yaml`
+- Update `flux/kustomization.yaml` to include new resources
+
+This gives us a nice comparison: Redis deployed via HelmRelease (`redis-helmrelease.yaml`) vs Redis deployed via raw Deployment (`redis-deployment.yaml`).
+
+##### Phase 2: E2E Test File (Day 1 afternoon)
+
+Create `test/e2e/kustomization_workflow_test.go`:
+
+```go
+var _ = Describe("Kustomization-based Upgrade Workflow", Ordered, func() {
+    // Similar structure to upgrade_workflow_test.go but with:
+
+    Context("with raw Deployment manifest", func() {
+        It("should upgrade image tag via custom versionPath", func() {
+            // ManagedApp with:
+            //   gitPath: "flux/apps/redis-raw/deployment.yaml"
+            //   versionPolicy:
+            //     versionPath: ".spec.template.spec.containers[0].image"
+            //
+            // UpgradeRequest targeting "redis:7.4.0"
+            // Verify: Git commit updates image tag, Flux reconciles, Deployment runs new image
+        })
+    })
+
+    Context("with StatefulSet and PVC", func() {
+        It("should discover workloads from Kustomization inventory", func() {
+            // ManagedApp with:
+            //   gitPath: "flux/apps/redis-persistent/statefulset.yaml"
+            //   kustomizationRef: (points to Kustomization managing the StatefulSet)
+            //   versionPolicy:
+            //     versionPath: ".spec.template.spec.containers[0].image"
+            //
+            // Verify: Controller discovers StatefulSet via Kustomization inventory
+            // Verify: PVC discovery works (for snapshot scenarios)
+        })
+
+        It("should upgrade StatefulSet with snapshot", func() {
+            // Full upgrade flow with skipSnapshot: false
+            // Verify: Snapshot created, workload scaled down, upgrade applied, workload scaled up
+        })
+    })
+})
+```
+
+##### Phase 3: Controller Unit Tests (Day 2 morning)
+
+Add Kustomization scenarios to `internal/controller/upgraderequest_unit_test.go`:
+
+```go
+func TestUpgradeRequest_KustomizationBasedDeployment(t *testing.T) {
+    // Test upgrade with:
+    // - gitPath pointing to a Deployment YAML (not HelmRelease)
+    // - Custom versionPath: ".spec.template.spec.containers[0].image"
+    // - No helmReleaseRef (discovery via Kustomization inventory)
+}
+
+func TestUpgradeRequest_CustomVersionPath(t *testing.T) {
+    // Test various versionPath configurations:
+    // - Image tag: ".spec.template.spec.containers[0].image"
+    // - Annotation: ".metadata.annotations['app.kubernetes.io/version']"
+    // - Nested: ".spec.template.spec.initContainers[0].image"
+}
+```
+
+Add to `internal/controller/rollbackrequest_unit_test.go`:
+
+```go
+func TestRollbackRequest_KustomizationBasedDeployment(t *testing.T) {
+    // Test rollback for Kustomization-managed workloads
+}
+```
+
+##### Phase 4: Discovery Comparison Tests (Day 2 afternoon)
+
+Create `internal/discovery/equivalence_test.go`:
+
+```go
+func TestDiscovery_EquivalentResults(t *testing.T) {
+    // Given: A HelmRelease that deploys a Deployment with a PVC
+    // And: An equivalent raw Deployment manifest managed by Kustomization
+    //
+    // When: DiscoverWorkloads is called for each
+    // Then: Both return the same workload info
+    //
+    // When: DiscoverPVCs is called for each
+    // Then: Both return the same PVC info
+}
+```
+
+##### Phase 5: Failure Scenario Coverage (Day 3)
+
+Add Kustomization variants to key failure scenarios in `test/e2e/failure_scenarios_test.go`:
+
+```go
+Context("Kustomization-based failure scenarios", func() {
+    It("should handle timeout for Kustomization deployment", func() {
+        // Same as existing timeout test but with Deployment manifest
+    })
+
+    It("should resume Kustomization when upgrade fails before Git commit", func() {
+        // Same as existing pre-commit failure test
+    })
+
+    It("should handle rollback for Kustomization deployment", func() {
+        // Rollback scenario with raw manifests
+    })
+})
+```
+
+##### Test Matrix Summary
+
+| Scenario | HelmRelease | Kustomization | Notes |
+|----------|-------------|---------------|-------|
+| Basic upgrade (dry-run) | ✅ existing | 🆕 Phase 2 | |
+| Basic upgrade (real) | ✅ existing | 🆕 Phase 2 | |
+| Custom versionPath | ❌ | 🆕 Phase 2,3 | New for both |
+| Workload discovery | ✅ existing | 🆕 Phase 2 | Via inventory |
+| PVC discovery | ✅ existing | 🆕 Phase 2 | Via inventory |
+| Snapshot + upgrade | ✅ existing | 🆕 Phase 2 | With StatefulSet |
+| Rollback | ✅ existing | 🆕 Phase 3,5 | |
+| Timeout handling | ✅ existing | 🆕 Phase 5 | |
+| Pre-commit failure | ✅ existing | 🆕 Phase 5 | |
+| Discovery equivalence | ❌ | 🆕 Phase 4 | New comparison test |
+
+---
+
 ## Future Testing Enhancements
 
 **Auto-rollback on health check failure**: Test scenario removed due to complexity. Requires:

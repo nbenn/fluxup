@@ -45,6 +45,7 @@ const (
 	testUpgradeName             = "test-upgrade"
 	reasonReconciliationTimeout = "ReconciliationTimeout"
 	reasonHealthCheckTimeout    = "HealthCheckTimeout"
+	reasonDryRunSucceeded       = "DryRunSucceeded"
 )
 
 func setupTestReconciler(_ *testing.T, objects ...client.Object) (*UpgradeRequestReconciler, *git.MockManager) {
@@ -279,8 +280,8 @@ func TestUpgradeRequest_DryRun(t *testing.T) {
 	if completeCond.Status != metav1.ConditionTrue {
 		t.Errorf("expected Complete=True for dry run, got %s", completeCond.Status)
 	}
-	if completeCond.Reason != "DryRunSucceeded" {
-		t.Errorf("expected reason DryRunSucceeded, got %s", completeCond.Reason)
+	if completeCond.Reason != reasonDryRunSucceeded {
+		t.Errorf("expected reason %s, got %s", reasonDryRunSucceeded, completeCond.Reason)
 	}
 
 	// Git should have been read but not committed
@@ -2327,4 +2328,460 @@ func TestUpgradeRequest_SnapshotCreationFailure(t *testing.T) {
 	if len(rollbackList.Items) != 0 {
 		t.Errorf("expected 0 RollbackRequests for pre-commit failure, got %d", len(rollbackList.Items))
 	}
+}
+
+// ============================================================================
+// Kustomization-based Deployment Tests (raw manifests with custom versionPath)
+// ============================================================================
+
+// setupKustomizationTestReconciler creates a reconciler for Kustomization-based deployment tests
+// (raw Deployment/StatefulSet manifests instead of HelmRelease)
+func setupKustomizationTestReconciler(_ *testing.T, objects ...client.Object) (*UpgradeRequestReconciler, *git.MockManager) {
+	scheme := runtime.NewScheme()
+	_ = fluxupv1alpha1.AddToScheme(scheme)
+	_ = kustomizev1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objects...).
+		WithStatusSubresource(&fluxupv1alpha1.UpgradeRequest{}, &fluxupv1alpha1.ManagedApp{}, &kustomizev1.Kustomization{}).
+		Build()
+
+	mockGit := git.NewMockManager()
+	// Set up a raw Deployment manifest (not HelmRelease)
+	mockGit.SetFile("flux/apps/redis-raw/deployment.yaml", []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-raw
+  namespace: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-raw
+  template:
+    metadata:
+      labels:
+        app: redis-raw
+    spec:
+      containers:
+      - name: redis
+        image: redis:7.2.0
+        ports:
+        - containerPort: 6379
+`))
+
+	reconciler := &UpgradeRequestReconciler{
+		Client:          fakeClient,
+		Scheme:          scheme,
+		GitManager:      mockGit,
+		SnapshotManager: snapshot.NewManager(fakeClient),
+		FluxHelper:      flux.NewHelper(fakeClient),
+		YAMLEditor:      yamlpkg.NewEditor(),
+		Discoverer:      discovery.New(fakeClient),
+		HealthChecker:   health.NewChecker(fakeClient),
+	}
+
+	return reconciler, mockGit
+}
+
+// TestUpgradeRequest_KustomizationBasedDeployment tests upgrade with raw Deployment manifest
+// using custom versionPath for image tag updates
+func TestUpgradeRequest_KustomizationBasedDeployment(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "redis-raw-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/redis-raw/deployment.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+			VersionPolicy: &fluxupv1alpha1.VersionPolicy{
+				AutoUpdate:  "none",
+				VersionPath: ".spec.template.spec.containers[0].image",
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "redis:7.2.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "redis:7.4.0"},
+		},
+	}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "redis-raw-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "redis-raw-app",
+			},
+			TargetVersion: &fluxupv1alpha1.VersionInfo{
+				Chart: "redis:7.4.0",
+			},
+			SkipSnapshot: true,
+		},
+	}
+
+	r, mockGit := setupKustomizationTestReconciler(t, kustomization, managedApp, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	// Reconcile until Complete condition is set
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 15); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionTrue {
+		t.Errorf("expected Complete=True, got %s (reason: %s, message: %s)",
+			completeCond.Status, completeCond.Reason, completeCond.Message)
+	}
+	if completeCond.Reason != "UpgradeSucceeded" {
+		t.Errorf("expected reason UpgradeSucceeded, got %s", completeCond.Reason)
+	}
+
+	// Verify Git commit was called with correct path and content
+	if len(mockGit.CommitFileCalls) != 1 {
+		t.Errorf("expected 1 commit call, got %d", len(mockGit.CommitFileCalls))
+	} else {
+		commitCall := mockGit.CommitFileCalls[0]
+		if commitCall.Path != "flux/apps/redis-raw/deployment.yaml" {
+			t.Errorf("expected commit path flux/apps/redis-raw/deployment.yaml, got %s", commitCall.Path)
+		}
+		// Verify the image was updated in the content
+		if !stringContains(string(commitCall.Content), "redis:7.4.0") {
+			t.Error("expected commit content to contain redis:7.4.0")
+		}
+	}
+}
+
+// TestUpgradeRequest_CustomVersionPath tests various versionPath configurations
+func TestUpgradeRequest_CustomVersionPath(t *testing.T) {
+	tests := []struct {
+		name           string
+		versionPath    string
+		initialContent string
+		targetVersion  string
+		expectInOutput string
+	}{
+		{
+			name:        "image tag update",
+			versionPath: ".spec.template.spec.containers[0].image",
+			initialContent: `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: myapp:1.0.0
+`,
+			targetVersion:  "myapp:2.0.0",
+			expectInOutput: "myapp:2.0.0",
+		},
+		{
+			name:        "init container image",
+			versionPath: ".spec.template.spec.initContainers[0].image",
+			initialContent: `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: init
+        image: busybox:1.35
+      containers:
+      - name: app
+        image: myapp:latest
+`,
+			targetVersion:  "busybox:1.36",
+			expectInOutput: "busybox:1.36",
+		},
+		{
+			name:        "annotation with dots in key",
+			versionPath: ".metadata.annotations['app.kubernetes.io/version']",
+			initialContent: `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+  annotations:
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 1
+`,
+			targetVersion:  "2.0.0",
+			expectInOutput: "app.kubernetes.io/version: \"2.0.0\"",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kustomization := &kustomizev1.Kustomization{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "apps",
+					Namespace: "flux-system",
+				},
+				Spec: kustomizev1.KustomizationSpec{
+					Suspend: false,
+				},
+				Status: kustomizev1.KustomizationStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:   "Ready",
+							Status: metav1.ConditionTrue,
+						},
+					},
+				},
+			}
+
+			managedApp := &fluxupv1alpha1.ManagedApp{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-app",
+					Namespace: "default",
+				},
+				Spec: fluxupv1alpha1.ManagedAppSpec{
+					GitPath: "flux/apps/test-app/manifest.yaml",
+					KustomizationRef: fluxupv1alpha1.ObjectReference{
+						Name:      "apps",
+						Namespace: "flux-system",
+					},
+					VersionPolicy: &fluxupv1alpha1.VersionPolicy{
+						AutoUpdate:  "none",
+						VersionPath: tt.versionPath,
+					},
+				},
+				Status: fluxupv1alpha1.ManagedAppStatus{
+					CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+					AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: tt.targetVersion},
+				},
+			}
+
+			upgrade := &fluxupv1alpha1.UpgradeRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-upgrade-%s", tt.name),
+					Namespace: "default",
+				},
+				Spec: fluxupv1alpha1.UpgradeRequestSpec{
+					ManagedAppRef: fluxupv1alpha1.ObjectReference{
+						Name: "test-app",
+					},
+					TargetVersion: &fluxupv1alpha1.VersionInfo{
+						Chart: tt.targetVersion,
+					},
+					SkipSnapshot: true,
+				},
+			}
+
+			scheme := runtime.NewScheme()
+			_ = fluxupv1alpha1.AddToScheme(scheme)
+			_ = kustomizev1.AddToScheme(scheme)
+			_ = corev1.AddToScheme(scheme)
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(kustomization, managedApp, upgrade).
+				WithStatusSubresource(&fluxupv1alpha1.UpgradeRequest{}, &fluxupv1alpha1.ManagedApp{}, &kustomizev1.Kustomization{}).
+				Build()
+
+			mockGit := git.NewMockManager()
+			mockGit.SetFile("flux/apps/test-app/manifest.yaml", []byte(tt.initialContent))
+
+			r := &UpgradeRequestReconciler{
+				Client:          fakeClient,
+				Scheme:          scheme,
+				GitManager:      mockGit,
+				SnapshotManager: snapshot.NewManager(fakeClient),
+				FluxHelper:      flux.NewHelper(fakeClient),
+				YAMLEditor:      yamlpkg.NewEditor(),
+				Discoverer:      discovery.New(fakeClient),
+				HealthChecker:   health.NewChecker(fakeClient),
+			}
+
+			ctx := context.Background()
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      upgrade.Name,
+					Namespace: upgrade.Namespace,
+				},
+			}
+
+			if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 15); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var result fluxupv1alpha1.UpgradeRequest
+			if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+				t.Fatalf("failed to get upgrade request: %v", err)
+			}
+
+			completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+			if completeCond == nil {
+				t.Fatal("expected Complete condition to be set")
+			}
+			if completeCond.Status != metav1.ConditionTrue {
+				t.Errorf("expected Complete=True, got %s (reason: %s)", completeCond.Status, completeCond.Reason)
+			}
+
+			// Verify Git commit content contains the expected updated value
+			if len(mockGit.CommitFileCalls) != 1 {
+				t.Errorf("expected 1 commit call, got %d", len(mockGit.CommitFileCalls))
+			} else {
+				content := string(mockGit.CommitFileCalls[0].Content)
+				if !stringContains(content, tt.expectInOutput) {
+					t.Errorf("expected commit content to contain %q, got:\n%s", tt.expectInOutput, content)
+				}
+			}
+		})
+	}
+}
+
+// TestUpgradeRequest_DryRunWithCustomVersionPath tests dry-run validation for custom versionPath
+func TestUpgradeRequest_DryRunWithCustomVersionPath(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "redis-raw-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/redis-raw/deployment.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+			VersionPolicy: &fluxupv1alpha1.VersionPolicy{
+				AutoUpdate:  "none",
+				VersionPath: ".spec.template.spec.containers[0].image",
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "redis:7.2.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "redis:7.4.0"},
+		},
+	}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "redis-raw-dryrun",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "redis-raw-app",
+			},
+			TargetVersion: &fluxupv1alpha1.VersionInfo{
+				Chart: "redis:7.4.0",
+			},
+			DryRun:       true,
+			SkipSnapshot: true,
+		},
+	}
+
+	r, mockGit := setupKustomizationTestReconciler(t, kustomization, managedApp, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionTrue {
+		t.Errorf("expected Complete=True, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != reasonDryRunSucceeded {
+		t.Errorf("expected reason %s, got %s", reasonDryRunSucceeded, completeCond.Reason)
+	}
+
+	// Dry run should NOT commit
+	if len(mockGit.CommitFileCalls) != 0 {
+		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+
+	// Should have read the file to validate
+	if len(mockGit.ReadFileCalls) != 1 {
+		t.Errorf("expected 1 read call for validation, got %d", len(mockGit.ReadFileCalls))
+	}
+}
+
+// stringContains checks if substr is in s (simple helper to avoid importing strings)
+func stringContains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

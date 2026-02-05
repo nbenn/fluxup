@@ -55,11 +55,17 @@ fi
 mkdir -p "${TEMP_DIR}/flux/repositories"
 mkdir -p "${TEMP_DIR}/flux/apps/gitea"
 mkdir -p "${TEMP_DIR}/flux/apps/redis"
+mkdir -p "${TEMP_DIR}/flux/apps/redis-raw"
+mkdir -p "${TEMP_DIR}/flux/apps/redis-persistent"
 
-# Copy manifests
+# Copy manifests - HelmRelease-based
 cp "${MANIFESTS_DIR}/helmrepositories.yaml" "${TEMP_DIR}/flux/repositories/"
 cp "${MANIFESTS_DIR}/gitea-helmrelease.yaml" "${TEMP_DIR}/flux/apps/gitea/helmrelease.yaml"
 cp "${MANIFESTS_DIR}/redis-helmrelease.yaml" "${TEMP_DIR}/flux/apps/redis/helmrelease.yaml"
+
+# Copy manifests - Kustomization-based (raw Deployment/StatefulSet)
+cp "${MANIFESTS_DIR}/redis-deployment.yaml" "${TEMP_DIR}/flux/apps/redis-raw/deployment.yaml"
+cp "${MANIFESTS_DIR}/redis-statefulset.yaml" "${TEMP_DIR}/flux/apps/redis-persistent/statefulset.yaml"
 
 # Create kustomization
 cat > "${TEMP_DIR}/flux/kustomization.yaml" << 'EOF'
@@ -69,16 +75,22 @@ resources:
   - repositories/helmrepositories.yaml
   - apps/gitea/helmrelease.yaml
   - apps/redis/helmrelease.yaml
+  - apps/redis-raw/deployment.yaml
+  - apps/redis-persistent/statefulset.yaml
 EOF
 
 # Also create top-level structure for alternative paths
 mkdir -p "${TEMP_DIR}/apps/gitea"
 mkdir -p "${TEMP_DIR}/apps/redis"
+mkdir -p "${TEMP_DIR}/apps/redis-raw"
+mkdir -p "${TEMP_DIR}/apps/redis-persistent"
 mkdir -p "${TEMP_DIR}/repositories"
 
 cp "${MANIFESTS_DIR}/helmrepositories.yaml" "${TEMP_DIR}/repositories/"
 cp "${MANIFESTS_DIR}/gitea-helmrelease.yaml" "${TEMP_DIR}/apps/gitea/helmrelease.yaml"
 cp "${MANIFESTS_DIR}/redis-helmrelease.yaml" "${TEMP_DIR}/apps/redis/helmrelease.yaml"
+cp "${MANIFESTS_DIR}/redis-deployment.yaml" "${TEMP_DIR}/apps/redis-raw/deployment.yaml"
+cp "${MANIFESTS_DIR}/redis-statefulset.yaml" "${TEMP_DIR}/apps/redis-persistent/statefulset.yaml"
 
 cat > "${TEMP_DIR}/kustomization.yaml" << 'EOF'
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -87,6 +99,8 @@ resources:
   - repositories/helmrepositories.yaml
   - apps/gitea/helmrelease.yaml
   - apps/redis/helmrelease.yaml
+  - apps/redis-raw/deployment.yaml
+  - apps/redis-persistent/statefulset.yaml
 EOF
 
 # Create README
@@ -99,7 +113,7 @@ git init -b main
 git config user.email 'fluxup@test.local'
 git config user.name 'FluxUp E2E'
 git add .
-git commit -m 'Add test HelmRelease manifests'
+git commit -m 'Add test manifests (HelmRelease + raw Deployment/StatefulSet)'
 git remote add origin "http://${GITEA_OWNER}:${GITEA_PASSWORD}@localhost:3000/${GITEA_OWNER}/${GITEA_REPO}.git"
 git push -u origin main --force
 

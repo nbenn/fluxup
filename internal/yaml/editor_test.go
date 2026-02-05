@@ -20,6 +20,11 @@ import (
 	"testing"
 )
 
+const (
+	testVersion200  = "2.0.0"
+	testVersion1100 = "11.0.0"
+)
+
 func TestEditor_UpdateHelmReleaseVersion(t *testing.T) {
 	editor := NewEditor()
 
@@ -61,7 +66,7 @@ spec:
     replicaCount: 1
 `
 
-	result, err := editor.UpdateHelmReleaseVersion([]byte(input), "11.0.0")
+	result, err := editor.UpdateHelmReleaseVersion([]byte(input), testVersion1100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -88,7 +93,7 @@ spec:
             version: "1.0.0"
 `
 
-	result, err := editor.UpdateVersion([]byte(input), "spec.template.spec.containers.0.custom.version", "2.0.0")
+	result, err := editor.UpdateVersion([]byte(input), "spec.template.spec.containers.0.custom.version", testVersion200)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -99,8 +104,8 @@ spec:
 		t.Fatalf("failed to get version: %v", err)
 	}
 
-	if version != "2.0.0" {
-		t.Errorf("expected version 2.0.0, got %s", version)
+	if version != testVersion200 {
+		t.Errorf("expected version %s, got %s", testVersion200, version)
 	}
 }
 
@@ -157,7 +162,7 @@ spec:
 `
 
 	// Test with leading dot in path
-	result, err := editor.UpdateVersion([]byte(input), ".spec.chart.spec.version", "2.0.0")
+	result, err := editor.UpdateVersion([]byte(input), ".spec.chart.spec.version", testVersion200)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -167,8 +172,8 @@ spec:
 		t.Fatalf("failed to get version: %v", err)
 	}
 
-	if version != "2.0.0" {
-		t.Errorf("expected version 2.0.0, got %s", version)
+	if version != testVersion200 {
+		t.Errorf("expected version %s, got %s", testVersion200, version)
 	}
 }
 
@@ -189,5 +194,158 @@ func TestDetermineVersionPath(t *testing.T) {
 				t.Errorf("DetermineVersionPath(%s) = %s, want %s", tt.datasource, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestParseVersionPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		expected []string
+	}{
+		{
+			name:     "simple dot notation",
+			path:     "spec.chart.spec.version",
+			expected: []string{"spec", "chart", "spec", "version"},
+		},
+		{
+			name:     "leading dot",
+			path:     ".spec.chart.spec.version",
+			expected: []string{"spec", "chart", "spec", "version"},
+		},
+		{
+			name:     "array index with dot notation",
+			path:     "spec.template.spec.containers.0.image",
+			expected: []string{"spec", "template", "spec", "containers", "0", "image"},
+		},
+		{
+			name:     "array index with bracket notation",
+			path:     "spec.template.spec.containers[0].image",
+			expected: []string{"spec", "template", "spec", "containers", "0", "image"},
+		},
+		{
+			name:     "annotation with dots in key (single quotes)",
+			path:     "metadata.annotations['app.kubernetes.io/version']",
+			expected: []string{"metadata", "annotations", "app.kubernetes.io/version"},
+		},
+		{
+			name:     "annotation with dots in key (double quotes)",
+			path:     `metadata.annotations["app.kubernetes.io/version"]`,
+			expected: []string{"metadata", "annotations", "app.kubernetes.io/version"},
+		},
+		{
+			name:     "mixed bracket and dot notation",
+			path:     "spec.template.spec.containers[0].env[1].value",
+			expected: []string{"spec", "template", "spec", "containers", "0", "env", "1", "value"},
+		},
+		{
+			name:     "leading dot with brackets",
+			path:     ".metadata.annotations['app.kubernetes.io/version']",
+			expected: []string{"metadata", "annotations", "app.kubernetes.io/version"},
+		},
+		{
+			name:     "consecutive brackets",
+			path:     "items[0]['key.with.dots']",
+			expected: []string{"items", "0", "key.with.dots"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseVersionPath(tt.path)
+			if len(result) != len(tt.expected) {
+				t.Errorf("parseVersionPath(%q) = %v (len=%d), want %v (len=%d)",
+					tt.path, result, len(result), tt.expected, len(tt.expected))
+				return
+			}
+			for i, part := range result {
+				if part != tt.expected[i] {
+					t.Errorf("parseVersionPath(%q)[%d] = %q, want %q",
+						tt.path, i, part, tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestEditor_UpdateVersion_AnnotationPath(t *testing.T) {
+	editor := NewEditor()
+
+	input := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  annotations:
+    app.kubernetes.io/version: "1.0.0"
+    other-annotation: "value"
+spec:
+  replicas: 1
+`
+
+	result, err := editor.UpdateVersion([]byte(input), "metadata.annotations['app.kubernetes.io/version']", testVersion200)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify the version was updated
+	version, err := editor.GetVersion(result, "metadata.annotations['app.kubernetes.io/version']")
+	if err != nil {
+		t.Fatalf("failed to get version: %v", err)
+	}
+
+	if version != testVersion200 {
+		t.Errorf("expected version %s, got %s", testVersion200, version)
+	}
+
+	// Verify other annotation is unchanged
+	otherVal, err := editor.GetVersion(result, "metadata.annotations.other-annotation")
+	if err != nil {
+		t.Fatalf("failed to get other annotation: %v", err)
+	}
+	if otherVal != "value" {
+		t.Errorf("other annotation changed unexpectedly: got %s", otherVal)
+	}
+}
+
+func TestEditor_UpdateVersion_ArrayBracketNotation(t *testing.T) {
+	editor := NewEditor()
+
+	input := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: myapp:v1.0.0
+        - name: sidecar
+          image: sidecar:v1.0.0
+`
+
+	// Update second container's image using bracket notation
+	result, err := editor.UpdateVersion([]byte(input), "spec.template.spec.containers[1].image", "sidecar:v2.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify the version was updated
+	version, err := editor.GetVersion(result, "spec.template.spec.containers[1].image")
+	if err != nil {
+		t.Fatalf("failed to get version: %v", err)
+	}
+
+	if version != "sidecar:v2.0.0" {
+		t.Errorf("expected sidecar:v2.0.0, got %s", version)
+	}
+
+	// Verify first container is unchanged
+	firstImage, err := editor.GetVersion(result, "spec.template.spec.containers[0].image")
+	if err != nil {
+		t.Fatalf("failed to get first container image: %v", err)
+	}
+	if firstImage != "myapp:v1.0.0" {
+		t.Errorf("first container image changed unexpectedly: got %s", firstImage)
 	}
 }

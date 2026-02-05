@@ -1,0 +1,47 @@
+# StatefulSet with PVC for snapshot testing
+# Used to test Kustomization-based upgrades with volume snapshots
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-persistent
+  namespace: redis
+spec:
+  serviceName: redis-persistent
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-persistent
+  template:
+    metadata:
+      labels:
+        app: redis-persistent
+    spec:
+      containers:
+      - name: redis
+        image: redis:7.2.0  # Version to be updated via versionPath
+        ports:
+        - containerPort: 6379
+        args:
+        - redis-server
+        - --appendonly
+        - "yes"
+        - --dir
+        - /data
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "250m"
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi

@@ -1,0 +1,30 @@
+# Raw Deployment with image tag versioning
+# (Mirrors redis-helmrelease.yaml but as raw manifest for comparison testing)
+# Used to test Kustomization-based upgrades with custom versionPath
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-raw
+  namespace: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-raw
+  template:
+    metadata:
+      labels:
+        app: redis-raw
+    spec:
+      containers:
+      - name: redis
+        image: redis:7.2.0  # Version to be updated via versionPath
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "250m"

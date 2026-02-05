@@ -111,14 +111,90 @@ func (e *Editor) GetVersion(content []byte, versionPath string) (string, error) 
 	return value, nil
 }
 
-// parseVersionPath converts a dot-separated path (possibly with leading dot) to a slice
-// Examples:
-//   - ".spec.chart.spec.version" -> ["spec", "chart", "spec", "version"]
-//   - "spec.chart.spec.version" -> ["spec", "chart", "spec", "version"]
+// parseVersionPath converts a path notation to a slice of path segments
+// Supports multiple formats:
+//   - Dot notation: ".spec.chart.spec.version" or "spec.chart.spec.version"
+//   - Array brackets: "containers[0].image" -> ["containers", "0", "image"]
+//   - Map key brackets: "annotations['app.kubernetes.io/version']" -> ["annotations", "app.kubernetes.io/version"]
+//
+// This allows specifying paths to keys that contain dots (like Kubernetes annotations)
 func parseVersionPath(path string) []string {
 	// Remove leading dot if present
 	path = strings.TrimPrefix(path, ".")
-	return strings.Split(path, ".")
+
+	var parts []string
+	var current strings.Builder
+	i := 0
+
+	for i < len(path) {
+		ch := path[i]
+
+		switch ch {
+		case '.':
+			// Dot separator - flush current segment
+			if current.Len() > 0 {
+				parts = append(parts, current.String())
+				current.Reset()
+			}
+			i++
+
+		case '[':
+			// Start of bracket notation
+			// First, flush any current segment
+			if current.Len() > 0 {
+				parts = append(parts, current.String())
+				current.Reset()
+			}
+
+			// Find the closing bracket
+			i++ // skip '['
+			if i >= len(path) {
+				// Malformed path, just return what we have
+				break
+			}
+
+			// Check if it's a quoted key (e.g., ['key.with.dots'])
+			if path[i] == '\'' || path[i] == '"' {
+				quote := path[i]
+				i++ // skip opening quote
+				for i < len(path) && path[i] != quote {
+					current.WriteByte(path[i])
+					i++
+				}
+				if i < len(path) {
+					i++ // skip closing quote
+				}
+			} else {
+				// Unquoted bracket content (e.g., array index [0])
+				for i < len(path) && path[i] != ']' {
+					current.WriteByte(path[i])
+					i++
+				}
+			}
+
+			// Flush the bracket content
+			if current.Len() > 0 {
+				parts = append(parts, current.String())
+				current.Reset()
+			}
+
+			// Skip the closing bracket
+			if i < len(path) && path[i] == ']' {
+				i++
+			}
+
+		default:
+			current.WriteByte(ch)
+			i++
+		}
+	}
+
+	// Flush any remaining content
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+
+	return parts
 }
 
 // DetermineVersionPath returns the appropriate version path for a given datasource
