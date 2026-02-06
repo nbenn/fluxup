@@ -81,6 +81,12 @@ var _ = Describe("Kustomization-based Upgrade Workflow", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
+		By("waiting for initial rollout to complete before patching")
+		cmd = exec.Command("kubectl", "rollout", "status", "deployment/fluxup-controller-manager",
+			"-n", namespace, "--timeout=5m")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
 		By("patching controller deployment with Git environment variables")
 		gitURL := fmt.Sprintf("http://gitea.%s.svc.cluster.local:3000/fluxup/flux-test-repo.git", giteaNamespace)
 		patchJSON := fmt.Sprintf(`{
@@ -398,7 +404,25 @@ spec:
 
 				By("waiting for upgrade to complete")
 				Eventually(func(g Gomega) {
+					// Log all conditions to see current state
 					cmd := exec.Command("kubectl", "get", "upgraderequest", redisRawAppName+"-upgrade",
+						"-n", ksTestNamespace, "-o", "jsonpath={.status.conditions}")
+					conditions, _ := utils.Run(cmd)
+					GinkgoWriter.Printf("Current conditions: %s\n", conditions)
+
+					// Log controller logs for context
+					cmd = exec.Command("kubectl", "logs", "-l", "control-plane=controller-manager",
+						"-n", namespace, "--tail=20")
+					logs, _ := utils.Run(cmd)
+					GinkgoWriter.Printf("Recent controller logs:\n%s\n", logs)
+
+					// Log Kustomization state
+					cmd = exec.Command("kubectl", "get", "kustomization", ksKustomizationName,
+						"-n", fluxSystemNS, "-o", "jsonpath={.spec.suspend},{.status.conditions[?(@.type=='Ready')].status},{.status.conditions[?(@.type=='Ready')].reason}")
+					ksState, _ := utils.Run(cmd)
+					GinkgoWriter.Printf("Kustomization state (suspend,ready,reason): %s\n", ksState)
+
+					cmd = exec.Command("kubectl", "get", "upgraderequest", redisRawAppName+"-upgrade",
 						"-n", ksTestNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
 					output, err := utils.Run(cmd)
 					g.Expect(err).NotTo(HaveOccurred())
@@ -466,7 +490,7 @@ spec:
     versionPath: ".spec.template.spec.containers[0].image"
   volumeSnapshots:
     enabled: true
-    snapshotClassName: "csi-hostpath-snapclass"
+    volumeSnapshotClassName: "csi-hostpath-snapclass"
 `, redisPersistentAppName, ksTestNamespace, ksKustomizationName, fluxSystemNS)
 
 				cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -500,7 +524,7 @@ spec:
     versionPath: ".spec.template.spec.containers[0].image"
   volumeSnapshots:
     enabled: true
-    snapshotClassName: "csi-hostpath-snapclass"
+    volumeSnapshotClassName: "csi-hostpath-snapclass"
 `, redisPersistentAppName, ksTestNamespace, ksKustomizationName, fluxSystemNS)
 
 				cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -549,7 +573,7 @@ spec:
     versionPath: ".spec.template.spec.containers[0].image"
   volumeSnapshots:
     enabled: true
-    snapshotClassName: "csi-hostpath-snapclass"
+    volumeSnapshotClassName: "csi-hostpath-snapclass"
 `, redisPersistentAppName, ksTestNamespace, ksKustomizationName, fluxSystemNS)
 
 				cmd := exec.Command("kubectl", "apply", "-f", "-")

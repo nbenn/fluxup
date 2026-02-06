@@ -88,6 +88,12 @@ var _ = Describe("Upgrade Workflow", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
+		By("waiting for initial rollout to complete before patching")
+		cmd = exec.Command("kubectl", "rollout", "status", "deployment/fluxup-controller-manager",
+			"-n", namespace, "--timeout=5m")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
 		By("patching controller deployment with Git environment variables")
 		gitURL := fmt.Sprintf("http://gitea.%s.svc.cluster.local:3000/fluxup/flux-test-repo.git", giteaNamespace)
 		patchJSON := fmt.Sprintf(`{

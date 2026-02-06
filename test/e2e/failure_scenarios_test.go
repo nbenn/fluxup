@@ -86,6 +86,12 @@ var _ = Describe("Upgrade/Rollback Failure Scenarios", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
+		By("waiting for initial rollout to complete before patching")
+		cmd = exec.Command("kubectl", "rollout", "status", "deployment/fluxup-controller-manager",
+			"-n", namespace, "--timeout=5m")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
 		By("patching controller deployment with Git environment variables")
 		gitURL := fmt.Sprintf("http://gitea.%s.svc.cluster.local:3000/fluxup/flux-test-repo.git", giteaNamespace)
 		patchJSON := fmt.Sprintf(`{
@@ -1110,6 +1116,591 @@ spec:
 
 			By("verifying it was deleted")
 			cmd = exec.Command("kubectl", "get", "upgraderequest", "delete-test", "-n", failureTestNS)
+			_, err = utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "UpgradeRequest should be deleted")
+		})
+	})
+
+	// ============================================================================
+	// Kustomization-based Deployment Failure Scenarios
+	// These tests verify that failure handling works correctly for raw manifests
+	// (Deployments, StatefulSets) managed via Kustomization, using custom versionPath.
+	// ============================================================================
+
+	Context("Kustomization-based deployment failures", func() {
+		It("should handle dry-run upgrade with custom versionPath for Deployment", func() {
+			By("creating a ManagedApp for raw Deployment with custom versionPath")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: redis-raw-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/redis-raw/deployment.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+  versionPolicy:
+    versionPath: ".spec.template.spec.containers[0].image"
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a dry-run UpgradeRequest for the Deployment")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: redis-raw-dryrun
+  namespace: %s
+spec:
+  managedAppRef:
+    name: redis-raw-app
+  targetVersion:
+    chart: "redis:7.4.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for dry-run to complete")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "redis-raw-dryrun",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying dry-run succeeded")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "redis-raw-dryrun",
+				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("DryRunSucceeded"))
+
+			By("verifying Kustomization was NOT suspended during dry-run")
+			cmd = exec.Command("kubectl", "get", "kustomization", kustomizationName,
+				"-n", fluxSystemNS, "-o", "jsonpath={.spec.suspend}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Or(BeEmpty(), Equal("false")))
+		})
+
+		It("should fail upgrade when versionPath is missing for Kustomization-based app", func() {
+			By("creating a ManagedApp WITHOUT versionPath (required for non-HelmRelease)")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: redis-raw-no-versionpath
+  namespace: %s
+spec:
+  gitPath: "flux/apps/redis-raw/deployment.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+  # Note: versionPath is intentionally omitted
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating an UpgradeRequest that should fail due to missing versionPath")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: missing-versionpath-test
+  namespace: %s
+spec:
+  managedAppRef:
+    name: redis-raw-no-versionpath
+  targetVersion:
+    chart: "redis:7.4.0"
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for upgrade to fail")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "missing-versionpath-test",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("False"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying failure reason indicates missing versionPath")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "missing-versionpath-test",
+				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("MissingVersionPath"))
+
+			By("verifying Kustomization is resumed after failure")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "kustomization", kustomizationName,
+					"-n", fluxSystemNS, "-o", "jsonpath={.spec.suspend}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Or(BeEmpty(), Equal("false")))
+			}, 30*time.Second, 2*time.Second).Should(Succeed())
+		})
+
+		It("should handle timeout for Kustomization-based deployment", func() {
+			By("creating a ManagedApp with very short timeout")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: redis-raw-timeout-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/redis-raw/deployment.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+  versionPolicy:
+    versionPath: ".spec.template.spec.containers[0].image"
+  healthCheck:
+    timeout: 1s
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating an UpgradeRequest that will likely timeout")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: redis-raw-timeout-test
+  namespace: %s
+spec:
+  managedAppRef:
+    name: redis-raw-timeout-app
+  targetVersion:
+    chart: "redis:99.99.99"
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for upgrade to complete (success or failure)")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "redis-raw-timeout-test",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("checking final status")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "redis-raw-timeout-test",
+				"-n", failureTestNS, "-o", "yaml")
+			fullOutput, _ := utils.Run(cmd)
+			GinkgoWriter.Printf("UpgradeRequest final status:\n%s\n", fullOutput)
+
+			By("verifying Kustomization is resumed after completion")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "kustomization", kustomizationName,
+					"-n", fluxSystemNS, "-o", "jsonpath={.spec.suspend}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Or(BeEmpty(), Equal("false")))
+			}, 30*time.Second, 2*time.Second).Should(Succeed())
+		})
+
+		It("should resume Kustomization when upgrade fails before Git commit for raw manifest", func() {
+			By("creating a ManagedApp with invalid git path for Deployment")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: invalid-deployment-path
+  namespace: %s
+spec:
+  gitPath: "nonexistent/deployment.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+  versionPolicy:
+    versionPath: ".spec.template.spec.containers[0].image"
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating an UpgradeRequest that will fail at Git read")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: precommit-deployment-failure
+  namespace: %s
+spec:
+  managedAppRef:
+    name: invalid-deployment-path
+  targetVersion:
+    chart: "redis:7.4.0"
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for upgrade to fail")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "precommit-deployment-failure",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("False"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying the failure reason indicates Git read failure")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "precommit-deployment-failure",
+				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Or(
+				ContainSubstring("GitReadFailed"),
+				ContainSubstring("NotFound"),
+				ContainSubstring("Failed"),
+			))
+
+			By("verifying Kustomization is NOT suspended (resumed after failure)")
+			cmd = exec.Command("kubectl", "get", "kustomization", kustomizationName,
+				"-n", fluxSystemNS, "-o", "jsonpath={.spec.suspend}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Or(BeEmpty(), Equal("false")))
+		})
+
+		It("should handle rollback request for Kustomization-based dry-run upgrade", func() {
+			By("creating a ManagedApp for raw Deployment")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: redis-raw-rollback-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/redis-raw/deployment.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+  versionPolicy:
+    versionPath: ".spec.template.spec.containers[0].image"
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a completed dry-run upgrade")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: redis-raw-upgrade-for-rollback
+  namespace: %s
+spec:
+  managedAppRef:
+    name: redis-raw-rollback-app
+  targetVersion:
+    chart: "redis:7.4.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for upgrade to complete")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "redis-raw-upgrade-for-rollback",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("creating a RollbackRequest for the dry-run upgrade (should fail - no snapshots)")
+			rollbackYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: RollbackRequest
+metadata:
+  name: redis-raw-rollback
+  namespace: %s
+spec:
+  upgradeRequestRef:
+    name: redis-raw-upgrade-for-rollback
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(rollbackYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for rollback to fail due to no snapshots")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "rollbackrequest", "redis-raw-rollback",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("False"))
+			}, 1*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying failure reason")
+			cmd = exec.Command("kubectl", "get", "rollbackrequest", "redis-raw-rollback",
+				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Or(Equal("NoSnapshotsAvailable"), Equal("NoPreviousVersion")))
+		})
+
+		It("should handle concurrent upgrades for Kustomization-based apps", func() {
+			By("creating a ManagedApp for raw Deployment")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: redis-raw-concurrent-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/redis-raw/deployment.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+  versionPolicy:
+    versionPath: ".spec.template.spec.containers[0].image"
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating first UpgradeRequest")
+			upgradeYAML1 := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: redis-raw-concurrent-1
+  namespace: %s
+spec:
+  managedAppRef:
+    name: redis-raw-concurrent-app
+  targetVersion:
+    chart: "redis:7.4.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML1)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("immediately creating second UpgradeRequest")
+			upgradeYAML2 := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: redis-raw-concurrent-2
+  namespace: %s
+spec:
+  managedAppRef:
+    name: redis-raw-concurrent-app
+  targetVersion:
+    chart: "redis:7.5.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML2)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for both upgrades to complete")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "redis-raw-concurrent-1",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output1, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "get", "upgraderequest", "redis-raw-concurrent-2",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output2, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				g.Expect(output1).NotTo(BeEmpty())
+				g.Expect(output2).NotTo(BeEmpty())
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying at least one completed successfully")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "redis-raw-concurrent-1",
+				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+			output1, _ := utils.Run(cmd)
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "redis-raw-concurrent-2",
+				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+			output2, _ := utils.Run(cmd)
+
+			Expect(output1 == "True" || output2 == "True").To(BeTrue(),
+				"Expected at least one upgrade to succeed, got: upgrade-1=%s, upgrade-2=%s", output1, output2)
+		})
+	})
+
+	Context("StatefulSet with PVC scenarios", func() {
+		It("should handle dry-run upgrade for StatefulSet with custom versionPath", func() {
+			By("creating a ManagedApp for StatefulSet with PVC")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: redis-persistent-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/redis-persistent/statefulset.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+  versionPolicy:
+    versionPath: ".spec.template.spec.containers[0].image"
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a dry-run UpgradeRequest for the StatefulSet")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: redis-persistent-dryrun
+  namespace: %s
+spec:
+  managedAppRef:
+    name: redis-persistent-app
+  targetVersion:
+    chart: "redis:7.4.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for dry-run to complete")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "redis-persistent-dryrun",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying dry-run succeeded")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "redis-persistent-dryrun",
+				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("DryRunSucceeded"))
+		})
+
+		It("should be deletable after Kustomization-based upgrade completion", func() {
+			By("creating a ManagedApp for Deployment")
+			managedAppYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: ManagedApp
+metadata:
+  name: redis-raw-delete-app
+  namespace: %s
+spec:
+  gitPath: "flux/apps/redis-raw/deployment.yaml"
+  kustomizationRef:
+    name: %s
+    namespace: %s
+  versionPolicy:
+    versionPath: ".spec.template.spec.containers[0].image"
+`, failureTestNS, kustomizationName, fluxSystemNS)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(managedAppYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a dry-run UpgradeRequest")
+			upgradeYAML := fmt.Sprintf(`
+apiVersion: fluxup.dev/v1alpha1
+kind: UpgradeRequest
+metadata:
+  name: redis-raw-delete-test
+  namespace: %s
+spec:
+  managedAppRef:
+    name: redis-raw-delete-app
+  targetVersion:
+    chart: "redis:7.4.0"
+  dryRun: true
+  skipSnapshot: true
+`, failureTestNS)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for completion")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "upgraderequest", "redis-raw-delete-test",
+					"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("deleting the completed UpgradeRequest")
+			cmd = exec.Command("kubectl", "delete", "upgraderequest", "redis-raw-delete-test",
+				"-n", failureTestNS, "--timeout=30s")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying it was deleted")
+			cmd = exec.Command("kubectl", "get", "upgraderequest", "redis-raw-delete-test", "-n", failureTestNS)
 			_, err = utils.Run(cmd)
 			Expect(err).To(HaveOccurred(), "UpgradeRequest should be deleted")
 		})

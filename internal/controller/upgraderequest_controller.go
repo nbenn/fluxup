@@ -104,6 +104,7 @@ func (r *UpgradeRequestReconciler) isPhaseTimedOut(upgrade *fluxupv1alpha1.Upgra
 // +kubebuilder:rbac:groups=helm.toolkit.fluxcd.io,resources=helmreleases,verbs=get;list;watch
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 func (r *UpgradeRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
@@ -649,6 +650,16 @@ func (r *UpgradeRequestReconciler) handleCommitting(ctx context.Context, upgrade
 	content, err := r.GitManager.ReadFile(ctx, app.Spec.GitPath)
 	if err != nil {
 		return r.setFailed(ctx, upgrade, "GitReadFailed", err.Error())
+	}
+
+	// If using the default HelmRelease version path, verify the file is actually a HelmRelease.
+	// The default path (spec.chart.spec.version) only makes sense for HelmRelease manifests.
+	// For other resource types (Deployment, StatefulSet, etc.), versionPath must be explicit.
+	if versionPath == yamlpkg.DefaultHelmReleaseVersionPath && (app.Spec.VersionPolicy == nil || app.Spec.VersionPolicy.VersionPath == "") {
+		if !yamlpkg.IsHelmRelease(content) {
+			return r.setFailed(ctx, upgrade, "MissingVersionPath",
+				"VersionPath must be specified in ManagedApp.spec.versionPolicy for non-HelmRelease resources")
+		}
 	}
 
 	// Update version in YAML

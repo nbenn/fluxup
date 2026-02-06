@@ -651,16 +651,27 @@ Context("Kustomization-based failure scenarios", func() {
 
 | Scenario | HelmRelease | Kustomization | Notes |
 |----------|-------------|---------------|-------|
-| Basic upgrade (dry-run) | ✅ existing | 🆕 Phase 2 | |
-| Basic upgrade (real) | ✅ existing | 🆕 Phase 2 | |
-| Custom versionPath | ❌ | 🆕 Phase 2,3 | New for both |
-| Workload discovery | ✅ existing | 🆕 Phase 2 | Via inventory |
-| PVC discovery | ✅ existing | 🆕 Phase 2 | Via inventory |
-| Snapshot + upgrade | ✅ existing | 🆕 Phase 2 | With StatefulSet |
-| Rollback | ✅ existing | 🆕 Phase 3,5 | |
-| Timeout handling | ✅ existing | 🆕 Phase 5 | |
-| Pre-commit failure | ✅ existing | 🆕 Phase 5 | |
-| Discovery equivalence | ❌ | 🆕 Phase 4 | New comparison test |
+| Basic upgrade (dry-run) | ✅ existing | ✅ Phase 2 (E2E) | `kustomization_workflow_test.go` |
+| Basic upgrade (real) | ✅ existing | ✅ Phase 2 (E2E) | |
+| Custom versionPath | ✅ Phase 3 | ✅ Phase 3 | `upgraderequest_unit_test.go` |
+| Workload discovery | ✅ existing | ✅ Phase 2 | Via inventory |
+| PVC discovery | ✅ existing | ✅ Phase 2 | Via inventory |
+| Snapshot + upgrade | ✅ existing | ✅ Phase 2 (E2E) | With StatefulSet |
+| Rollback | ✅ existing | 🔲 Phase 5 | Needs E2E tests |
+| Timeout handling | ✅ existing | 🔲 Phase 5 | Needs E2E tests |
+| Pre-commit failure | ✅ existing | 🔲 Phase 5 | Needs E2E tests |
+| Discovery equivalence | ✅ Phase 4 | ✅ Phase 4 | `equivalence_test.go` |
+
+##### Implementation Progress
+
+- **Phase 1 ✅**: Test fixtures created (`redis-deployment.yaml`, `redis-statefulset.yaml`, updated `seed-repo.sh`)
+- **Phase 2 ✅**: E2E test file created (`test/e2e/kustomization_workflow_test.go`)
+- **Phase 3 ✅**: Controller unit tests with custom versionPath (`internal/controller/upgraderequest_unit_test.go`)
+- **Phase 4 ✅**: Discovery equivalence tests (`internal/discovery/equivalence_test.go`)
+- **Phase 5 🔲**: Failure scenario E2E tests - requires devcontainer environment
+
+**Additional fixes made during implementation:**
+- Fixed YAML editor `parseVersionPath` to handle bracket notation (e.g., `annotations['app.kubernetes.io/version']`)
 
 ---
 

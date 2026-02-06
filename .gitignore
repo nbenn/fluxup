@@ -7,7 +7,7 @@ cover.out
 coverage.out
 
 # Test infrastructure credentials
-.devcontainer/test-infra/.env
+.devcontainer/test-infra/**/.env
 
 # Local devcontainer overrides
 .devcontainer/docker-compose.local.yml

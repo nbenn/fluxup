@@ -197,6 +197,19 @@ func parseVersionPath(path string) []string {
 	return parts
 }
 
+// IsHelmRelease checks if the given YAML content is a HelmRelease resource.
+func IsHelmRelease(content []byte) bool {
+	obj, err := yaml.Parse(string(content))
+	if err != nil {
+		return false
+	}
+	node, err := obj.Pipe(yaml.Lookup("kind"))
+	if err != nil || node == nil {
+		return false
+	}
+	return yaml.GetValue(node) == "HelmRelease"
+}
+
 // DetermineVersionPath returns the appropriate version path for a given datasource
 // For HelmRelease, returns the standard chart version path
 // For other types, returns empty string (must be specified explicitly)
