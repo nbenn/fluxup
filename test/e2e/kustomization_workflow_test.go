@@ -217,7 +217,8 @@ spec:
     name: %s
   path: ./flux
   prune: true
-`, ksKustomizationName, fluxSystemNS, ksGitRepoName)
+  targetNamespace: %s
+`, ksKustomizationName, fluxSystemNS, ksGitRepoName, ksTestNamespace)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(kustomizationYAML)

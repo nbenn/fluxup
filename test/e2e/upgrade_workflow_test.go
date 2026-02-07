@@ -173,7 +173,7 @@ var _ = Describe("Upgrade Workflow", Ordered, func() {
 
 	Context("with Flux GitRepository", func() {
 		const (
-			gitRepoName       = "flux-test-repo"
+			gitRepoName       = "flux-test-repo-upgrade"
 			kustomizationName = "e2e-apps"
 		)
 

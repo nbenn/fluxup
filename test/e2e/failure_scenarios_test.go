@@ -34,7 +34,7 @@ import (
 var _ = Describe("Upgrade/Rollback Failure Scenarios", Ordered, func() {
 	const (
 		failureTestNS     = "e2e-failure-test"
-		gitRepoName       = "flux-test-repo"
+		gitRepoName       = "flux-test-repo-failure"
 		kustomizationName = "failure-test-apps"
 	)
 
