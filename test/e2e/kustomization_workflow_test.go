@@ -429,7 +429,7 @@ spec:
 					By("verifying Deployment has updated image")
 					Eventually(func(g Gomega) {
 						cmd := exec.Command("kubectl", "get", "deployment", "redis-raw",
-							"-n", "redis", "-o", "jsonpath={.spec.template.spec.containers[0].image}")
+							"-n", ksTestNamespace, "-o", "jsonpath={.spec.template.spec.containers[0].image}")
 						image, err := utils.Run(cmd)
 						g.Expect(err).NotTo(HaveOccurred())
 						g.Expect(image).To(Equal("redis:7.4.0"))
@@ -518,14 +518,14 @@ spec:
 
 				By("verifying StatefulSet exists in cluster (deployed via Kustomization)")
 				Eventually(func(g Gomega) {
-					cmd := exec.Command("kubectl", "get", "statefulset", "redis-persistent", "-n", "redis")
+					cmd := exec.Command("kubectl", "get", "statefulset", "redis-persistent", "-n", ksTestNamespace)
 					_, err := utils.Run(cmd)
 					g.Expect(err).NotTo(HaveOccurred())
 				}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
 				By("verifying PVC was created by StatefulSet")
 				Eventually(func(g Gomega) {
-					cmd := exec.Command("kubectl", "get", "pvc", "-n", "redis", "-l", "app=redis-persistent")
+					cmd := exec.Command("kubectl", "get", "pvc", "-n", ksTestNamespace, "-l", "app=redis-persistent")
 					output, err := utils.Run(cmd)
 					g.Expect(err).NotTo(HaveOccurred())
 					g.Expect(output).To(ContainSubstring("data-redis-persistent"))
