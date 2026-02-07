@@ -729,6 +729,534 @@ func TestRollbackRequest_GitRevert(t *testing.T) {
 	}
 }
 
+func TestRollbackRequest_DryRunUpgradeNotFound(t *testing.T) {
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-rollback",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: "nonexistent-upgrade",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, mockGit := setupRollbackTestReconciler(t, rollback)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      rollback.Name,
+			Namespace: rollback.Namespace,
+		},
+	}
+
+	if err := reconcileRollbackUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.RollbackRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: rollback.Name, Namespace: rollback.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get rollback request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "UpgradeRequestNotFound" {
+		t.Errorf("expected reason UpgradeRequestNotFound, got %s", completeCond.Reason)
+	}
+	if len(mockGit.CommitFileCalls) != 0 {
+		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+}
+
+func TestRollbackRequest_DryRunUpgradeInProgress(t *testing.T) {
+	// UpgradeRequest without Complete condition (still in progress)
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeSuspended,
+					Status: metav1.ConditionTrue,
+					Reason: "KustomizationSuspended",
+				},
+			},
+		},
+	}
+
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-rollback",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-upgrade",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, mockGit := setupRollbackTestReconciler(t, upgrade, rollback)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      rollback.Name,
+			Namespace: rollback.Namespace,
+		},
+	}
+
+	if err := reconcileRollbackUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.RollbackRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: rollback.Name, Namespace: rollback.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get rollback request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "UpgradeInProgress" {
+		t.Errorf("expected reason UpgradeInProgress, got %s", completeCond.Reason)
+	}
+	if len(mockGit.CommitFileCalls) != 0 {
+		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+}
+
+func TestRollbackRequest_DryRunNoSnapshots(t *testing.T) {
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeComplete,
+					Status: metav1.ConditionTrue,
+					Reason: "UpgradeSucceeded",
+				},
+			},
+			// No Snapshot — no snapshots taken
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+		},
+	}
+
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-rollback",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-upgrade",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, mockGit := setupRollbackTestReconciler(t, upgrade, rollback)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      rollback.Name,
+			Namespace: rollback.Namespace,
+		},
+	}
+
+	if err := reconcileRollbackUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.RollbackRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: rollback.Name, Namespace: rollback.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get rollback request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "NoSnapshotsAvailable" {
+		t.Errorf("expected reason NoSnapshotsAvailable, got %s", completeCond.Reason)
+	}
+	if len(mockGit.CommitFileCalls) != 0 {
+		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+}
+
+func TestRollbackRequest_DryRunNoPreviousVersion(t *testing.T) {
+	now := metav1.Now()
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeComplete,
+					Status: metav1.ConditionTrue,
+					Reason: "UpgradeSucceeded",
+				},
+			},
+			Snapshot: &fluxupv1alpha1.SnapshotStatus{
+				CreatedAt: &now,
+				PVCSnapshots: []fluxupv1alpha1.PVCSnapshotInfo{
+					{PVCName: "data-0", SnapshotName: "snap-1"},
+				},
+			},
+			// Upgrade present but no PreviousVersion
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				NewVersion: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+		},
+	}
+
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-rollback",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-upgrade",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, mockGit := setupRollbackTestReconciler(t, upgrade, rollback)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      rollback.Name,
+			Namespace: rollback.Namespace,
+		},
+	}
+
+	if err := reconcileRollbackUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.RollbackRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: rollback.Name, Namespace: rollback.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get rollback request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "NoPreviousVersion" {
+		t.Errorf("expected reason NoPreviousVersion, got %s", completeCond.Reason)
+	}
+	if len(mockGit.CommitFileCalls) != 0 {
+		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+}
+
+func TestRollbackRequest_DryRunSnapshotNotReady(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+	}
+
+	now := metav1.Now()
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeComplete,
+					Status: metav1.ConditionTrue,
+					Reason: "UpgradeSucceeded",
+				},
+			},
+			Snapshot: &fluxupv1alpha1.SnapshotStatus{
+				CreatedAt: &now,
+				PVCSnapshots: []fluxupv1alpha1.PVCSnapshotInfo{
+					{PVCName: "data-0", SnapshotName: "snap-deleted"},
+				},
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+		},
+	}
+
+	// NO VolumeSnapshot object created — preflight will fail
+
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-rollback",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-upgrade",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, mockGit := setupRollbackTestReconciler(t, kustomization, managedApp, upgrade, rollback)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      rollback.Name,
+			Namespace: rollback.Namespace,
+		},
+	}
+
+	if err := reconcileRollbackUntilConditionN(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 10); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.RollbackRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: rollback.Name, Namespace: rollback.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get rollback request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != reasonPreflightFailed {
+		t.Errorf("expected reason %s, got %s", reasonPreflightFailed, completeCond.Reason)
+	}
+	if !containsStr(completeCond.Message, "snap-deleted") {
+		t.Errorf("expected message to mention the missing snapshot, got: %s", completeCond.Message)
+	}
+	if len(mockGit.CommitFileCalls) != 0 {
+		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+}
+
+func TestRollbackRequest_DryRunSummaryMessage(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+	}
+
+	now := metav1.Now()
+	readyToUse := true
+
+	snap := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snap-1",
+			Namespace: "default",
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{
+			ReadyToUse: &readyToUse,
+		},
+	}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-upgrade",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+		},
+		Status: fluxupv1alpha1.UpgradeRequestStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   fluxupv1alpha1.ConditionTypeComplete,
+					Status: metav1.ConditionTrue,
+					Reason: "UpgradeSucceeded",
+				},
+			},
+			Snapshot: &fluxupv1alpha1.SnapshotStatus{
+				CreatedAt: &now,
+				PVCSnapshots: []fluxupv1alpha1.PVCSnapshotInfo{
+					{PVCName: "data-0", SnapshotName: "snap-1"},
+				},
+			},
+			Upgrade: &fluxupv1alpha1.UpgradeStatus{
+				PreviousVersion: &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+				NewVersion:      &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+			},
+		},
+	}
+
+	rollback := &fluxupv1alpha1.RollbackRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-rollback",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.RollbackRequestSpec{
+			UpgradeRequestRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-upgrade",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, _ := setupRollbackTestReconciler(t, kustomization, managedApp, snap, upgrade, rollback)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      rollback.Name,
+			Namespace: rollback.Namespace,
+		},
+	}
+
+	if err := reconcileRollbackUntilConditionN(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 10); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.RollbackRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: rollback.Name, Namespace: rollback.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get rollback request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Complete=True, got %s (reason: %s, message: %s)",
+			completeCond.Status, completeCond.Reason, completeCond.Message)
+	}
+	if completeCond.Reason != "DryRunSucceeded" {
+		t.Errorf("expected reason DryRunSucceeded, got %s", completeCond.Reason)
+	}
+
+	msg := completeCond.Message
+	// Verify rollback-specific summary content
+	checks := []struct {
+		substr string
+		desc   string
+	}{
+		{"Dry run passed.", "dry run success prefix"},
+		{"Would rollback from 2.0.0 to 1.0.0", "version change description"},
+		{"spec.chart.spec.version", "default version path"},
+		{"suspend/resume: verified", "suspend/resume verification"},
+	}
+	for _, c := range checks {
+		if !containsStr(msg, c.substr) {
+			t.Errorf("expected message to contain %s (%q), got: %s", c.desc, c.substr, msg)
+		}
+	}
+}
+
 // containsStr checks if s contains substr
 func containsStr(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {

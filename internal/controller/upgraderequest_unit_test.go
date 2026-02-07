@@ -46,6 +46,7 @@ const (
 	reasonReconciliationTimeout = "ReconciliationTimeout"
 	reasonHealthCheckTimeout    = "HealthCheckTimeout"
 	reasonDryRunSucceeded       = "DryRunSucceeded"
+	reasonPreflightFailed       = "PreflightFailed"
 )
 
 func setupTestReconciler(_ *testing.T, objects ...client.Object) (*UpgradeRequestReconciler, *git.MockManager) {
@@ -2813,6 +2814,681 @@ func TestUpgradeRequest_DryRunWithCustomVersionPath(t *testing.T) {
 	// Should have read the file for diff preview (may be called multiple times across reconcile passes)
 	if len(mockGit.ReadFileCalls) < 1 {
 		t.Errorf("expected at least 1 read call for validation, got %d", len(mockGit.ReadFileCalls))
+	}
+}
+
+func TestUpgradeRequest_DryRunManagedAppNotFound(t *testing.T) {
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testUpgradeName,
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "nonexistent-app",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, mockGit := setupTestReconciler(t, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "ManagedAppNotFound" {
+		t.Errorf("expected reason ManagedAppNotFound, got %s", completeCond.Reason)
+	}
+	if len(mockGit.CommitFileCalls) != 0 {
+		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+}
+
+func TestUpgradeRequest_DryRunNoUpdateAvailable(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: nil, // No update available
+		},
+	}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testUpgradeName,
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, mockGit := setupTestReconciler(t, kustomization, managedApp, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != "NoUpdateAvailable" {
+		t.Errorf("expected reason NoUpdateAvailable, got %s", completeCond.Reason)
+	}
+	if len(mockGit.CommitFileCalls) != 0 {
+		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+}
+
+func TestUpgradeRequest_DryRunWithTargetVersion(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: nil, // No AvailableUpdate — using explicit TargetVersion
+		},
+	}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testUpgradeName,
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			TargetVersion: &fluxupv1alpha1.VersionInfo{Chart: "3.0.0"},
+			DryRun:        true,
+		},
+	}
+
+	r, mockGit := setupTestReconciler(t, kustomization, managedApp, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 10); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionTrue {
+		t.Errorf("expected Complete=True, got %s (reason: %s, message: %s)",
+			completeCond.Status, completeCond.Reason, completeCond.Message)
+	}
+	if completeCond.Reason != reasonDryRunSucceeded {
+		t.Errorf("expected reason %s, got %s", reasonDryRunSucceeded, completeCond.Reason)
+	}
+
+	// Should mention the explicit target version
+	if !stringContains(completeCond.Message, "3.0.0") {
+		t.Errorf("expected message to contain target version '3.0.0', got: %s", completeCond.Message)
+	}
+	if !stringContains(completeCond.Message, "1.0.0") {
+		t.Errorf("expected message to contain current version '1.0.0', got: %s", completeCond.Message)
+	}
+
+	if len(mockGit.CommitFileCalls) != 0 {
+		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+}
+
+func TestUpgradeRequest_DryRunWithImageUpdate(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+			VersionPolicy: &fluxupv1alpha1.VersionPolicy{
+				VersionPath: "spec.values.image.tag",
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion: &fluxupv1alpha1.VersionInfo{
+				Images: []fluxupv1alpha1.ImageInfo{{Name: "myapp", Tag: "v1.0.0"}},
+			},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{
+				Images: []fluxupv1alpha1.ImageInfo{{Name: "myapp", Tag: "v2.0.0"}},
+			},
+		},
+	}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testUpgradeName,
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, mockGit := setupTestReconciler(t, kustomization, managedApp, upgrade)
+
+	// Set up mock Git with a HelmRelease that has image values
+	mockGit.SetFile("flux/apps/test-app/helmrelease.yaml", []byte(`apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: test-app
+spec:
+  values:
+    image:
+      repository: myapp
+      tag: "v1.0.0"
+`))
+
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 10); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionTrue {
+		t.Errorf("expected Complete=True, got %s (reason: %s, message: %s)",
+			completeCond.Status, completeCond.Reason, completeCond.Message)
+	}
+	if completeCond.Reason != reasonDryRunSucceeded {
+		t.Errorf("expected reason %s, got %s", reasonDryRunSucceeded, completeCond.Reason)
+	}
+
+	// Should mention the image versions
+	if !stringContains(completeCond.Message, "v1.0.0") || !stringContains(completeCond.Message, "v2.0.0") {
+		t.Errorf("expected message to contain image version info, got: %s", completeCond.Message)
+	}
+	// Should mention the custom version path
+	if !stringContains(completeCond.Message, "spec.values.image.tag") {
+		t.Errorf("expected message to contain version path, got: %s", completeCond.Message)
+	}
+
+	if len(mockGit.CommitFileCalls) != 0 {
+		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+}
+
+func TestUpgradeRequest_DryRunGitReadError(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+		},
+	}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testUpgradeName,
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, mockGit := setupTestReconciler(t, kustomization, managedApp, upgrade)
+	// Inject Git read error
+	mockGit.ReadFileErr = fmt.Errorf("connection refused")
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != reasonPreflightFailed {
+		t.Errorf("expected reason %s, got %s", reasonPreflightFailed, completeCond.Reason)
+	}
+	if !stringContains(completeCond.Message, "connection refused") {
+		t.Errorf("expected message to mention the error, got: %s", completeCond.Message)
+	}
+}
+
+func TestUpgradeRequest_DryRunKustomizationNotFound(t *testing.T) {
+	// No Kustomization object created — preflight will fail
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "nonexistent-ks",
+				Namespace: "flux-system",
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+		},
+	}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testUpgradeName,
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, _ := setupTestReconciler(t, managedApp, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionFalse {
+		t.Errorf("expected Complete=False, got %s", completeCond.Status)
+	}
+	if completeCond.Reason != reasonPreflightFailed {
+		t.Errorf("expected reason %s, got %s", reasonPreflightFailed, completeCond.Reason)
+	}
+}
+
+func TestUpgradeRequest_DryRunSummaryMessage(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	managedApp := &fluxupv1alpha1.ManagedApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-app",
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.ManagedAppSpec{
+			GitPath: "flux/apps/test-app/helmrelease.yaml",
+			KustomizationRef: fluxupv1alpha1.ObjectReference{
+				Name:      "apps",
+				Namespace: "flux-system",
+			},
+		},
+		Status: fluxupv1alpha1.ManagedAppStatus{
+			CurrentVersion:  &fluxupv1alpha1.VersionInfo{Chart: "1.0.0"},
+			AvailableUpdate: &fluxupv1alpha1.VersionInfo{Chart: "2.0.0"},
+		},
+	}
+
+	upgrade := &fluxupv1alpha1.UpgradeRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testUpgradeName,
+			Namespace: "default",
+		},
+		Spec: fluxupv1alpha1.UpgradeRequestSpec{
+			ManagedAppRef: fluxupv1alpha1.ObjectReference{
+				Name: "test-app",
+			},
+			DryRun: true,
+		},
+	}
+
+	r, _ := setupTestReconciler(t, kustomization, managedApp, upgrade)
+	ctx := context.Background()
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      upgrade.Name,
+			Namespace: upgrade.Namespace,
+		},
+	}
+
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 10); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result fluxupv1alpha1.UpgradeRequest
+	if err := r.Get(ctx, types.NamespacedName{Name: upgrade.Name, Namespace: upgrade.Namespace}, &result); err != nil {
+		t.Fatalf("failed to get upgrade request: %v", err)
+	}
+
+	completeCond := meta.FindStatusCondition(result.Status.Conditions, fluxupv1alpha1.ConditionTypeComplete)
+	if completeCond == nil {
+		t.Fatal("expected Complete condition to be set")
+	}
+	if completeCond.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Complete=True, got %s (reason: %s, message: %s)",
+			completeCond.Status, completeCond.Reason, completeCond.Message)
+	}
+
+	msg := completeCond.Message
+	// Verify all expected parts of the summary
+	checks := []struct {
+		substr string
+		desc   string
+	}{
+		{"Dry run passed.", "dry run success prefix"},
+		{"Would upgrade from 1.0.0 to 2.0.0", "version change description"},
+		{"spec.chart.spec.version", "default version path"},
+		{"flux/apps/test-app/helmrelease.yaml", "git path"},
+		{"Preflight:", "preflight section"},
+		{"Kustomization flux-system/apps Ready", "Kustomization status"},
+		{"Snapshots disabled", "snapshot status"},
+		{"suspend/resume: verified", "suspend/resume verification"},
+	}
+	for _, c := range checks {
+		if !stringContains(msg, c.substr) {
+			t.Errorf("expected message to contain %s (%q), got: %s", c.desc, c.substr, msg)
+		}
+	}
+}
+
+func TestBuildDryRunSummary(t *testing.T) {
+	tests := []struct {
+		name           string
+		operation      string
+		preflight      *preflightResult
+		currentVersion string
+		newVersion     string
+		versionPath    string
+		gitPath        string
+		wantContains   []string
+		wantMissing    []string
+	}{
+		{
+			name:           "upgrade with version and no workloads",
+			operation:      "upgrade",
+			preflight:      &preflightResult{Summary: []string{"Kustomization flux-system/apps Ready. Snapshots disabled"}},
+			currentVersion: "1.0.0",
+			newVersion:     "2.0.0",
+			versionPath:    "spec.chart.spec.version",
+			gitPath:        "flux/apps/test/hr.yaml",
+			wantContains:   []string{"Dry run passed.", "Would upgrade from 1.0.0 to 2.0.0", "spec.chart.spec.version", "flux/apps/test/hr.yaml", "suspend/resume: verified"},
+			wantMissing:    []string{"scale down/up"},
+		},
+		{
+			name:      "rollback with workloads",
+			operation: "rollback",
+			preflight: &preflightResult{
+				Summary:   []string{"Kustomization flux-system/apps Ready. 1 snapshots to restore, 1 workloads to scale"},
+				Workloads: []discovery.WorkloadInfo{{Kind: "Deployment", Name: "redis"}},
+			},
+			currentVersion: "2.0.0",
+			newVersion:     "1.0.0",
+			versionPath:    "spec.chart.spec.version",
+			gitPath:        "flux/apps/redis/hr.yaml",
+			wantContains:   []string{"Dry run passed.", "Would rollback from 2.0.0 to 1.0.0", "suspend/resume: verified", "scale down/up: verified (Deployment/redis)"},
+		},
+		{
+			name:           "no version path (unknown version)",
+			operation:      "upgrade",
+			preflight:      &preflightResult{Summary: []string{"Kustomization flux-system/apps Ready"}},
+			currentVersion: "",
+			newVersion:     "",
+			versionPath:    "",
+			gitPath:        "",
+			wantContains:   []string{"Dry run passed.", "suspend/resume: verified"},
+			wantMissing:    []string{"Would upgrade"},
+		},
+		{
+			name:      "multiple workloads",
+			operation: "upgrade",
+			preflight: &preflightResult{
+				Summary: []string{"Kustomization flux-system/apps Ready. 2 PVCs to snapshot, 2 workloads to scale"},
+				Workloads: []discovery.WorkloadInfo{
+					{Kind: "Deployment", Name: "web"},
+					{Kind: "StatefulSet", Name: "db"},
+				},
+			},
+			currentVersion: "1.0.0",
+			newVersion:     "2.0.0",
+			versionPath:    "spec.chart.spec.version",
+			gitPath:        "flux/apps/app/hr.yaml",
+			wantContains:   []string{"scale down/up: verified (Deployment/web, StatefulSet/db)"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildDryRunSummary(tt.operation, tt.preflight, tt.currentVersion, tt.newVersion, tt.versionPath, tt.gitPath)
+
+			for _, want := range tt.wantContains {
+				if !stringContains(result, want) {
+					t.Errorf("expected summary to contain %q, got: %s", want, result)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if stringContains(result, missing) {
+					t.Errorf("expected summary NOT to contain %q, got: %s", missing, result)
+				}
+			}
+		})
 	}
 }
 
