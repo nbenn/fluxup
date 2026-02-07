@@ -52,6 +52,15 @@ const OperationFinalizer = "fluxup.dev/operation-protection"
 // reasonNotReady is a shared string used as a condition reason or status label.
 const reasonNotReady = "NotReady"
 
+// reasonedError carries a condition reason alongside the error message,
+// allowing callers to set a specific status reason instead of a generic one.
+type reasonedError struct {
+	reason  string
+	message string
+}
+
+func (e *reasonedError) Error() string { return e.message }
+
 // Phase timeout defaults (conservative values)
 const (
 	TimeoutSuspend       = 2 * time.Minute
@@ -232,7 +241,10 @@ func (r *UpgradeRequestReconciler) runGitDiffPreview(ctx context.Context, app *f
 	} else if len(targetVersion.Images) > 0 {
 		newVersion = targetVersion.Images[0].Tag
 		if app.Spec.VersionPolicy == nil || app.Spec.VersionPolicy.VersionPath == "" {
-			return "", "", "", fmt.Errorf("VersionPath must be specified for image updates")
+			return "", "", "", &reasonedError{
+				reason:  "MissingVersionPath",
+				message: "VersionPath must be specified for image updates",
+			}
 		}
 	} else {
 		return "", "", "", fmt.Errorf("no chart version or images specified")
@@ -247,7 +259,10 @@ func (r *UpgradeRequestReconciler) runGitDiffPreview(ctx context.Context, app *f
 	// Verify it's a HelmRelease if using the default path
 	if versionPath == yamlpkg.DefaultHelmReleaseVersionPath && (app.Spec.VersionPolicy == nil || app.Spec.VersionPolicy.VersionPath == "") {
 		if !yamlpkg.IsHelmRelease(content) {
-			return "", "", "", fmt.Errorf("VersionPath must be specified for non-HelmRelease resources")
+			return "", "", "", &reasonedError{
+				reason:  "MissingVersionPath",
+				message: "VersionPath must be specified for non-HelmRelease resources",
+			}
 		}
 	}
 
@@ -394,7 +409,11 @@ func (r *UpgradeRequestReconciler) handleDryRun(ctx context.Context, upgrade *fl
 	if r.GitManager != nil {
 		currentVersion, newVersion, versionPath, err = r.runGitDiffPreview(ctx, app, targetVersion)
 		if err != nil {
-			return r.setFailed(ctx, upgrade, "PreflightFailed", err.Error())
+			reason := "PreflightFailed"
+			if re, ok := err.(*reasonedError); ok {
+				reason = re.reason
+			}
+			return r.setFailed(ctx, upgrade, reason, err.Error())
 		}
 	}
 
@@ -749,7 +768,11 @@ func (r *UpgradeRequestReconciler) handleSuspend(ctx context.Context, upgrade *f
 	// --- Git diff preview (runs for all operations) ---
 	if r.GitManager != nil {
 		if _, _, _, err := r.runGitDiffPreview(ctx, app, targetVersion); err != nil {
-			return r.setFailed(ctx, upgrade, "PreflightFailed", err.Error())
+			reason := "PreflightFailed"
+			if re, ok := err.(*reasonedError); ok {
+				reason = re.reason
+			}
+			return r.setFailed(ctx, upgrade, reason, err.Error())
 		}
 	}
 

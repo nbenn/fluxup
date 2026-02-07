@@ -686,9 +686,9 @@ func TestUpgradeRequest_ImageUpdateMissingVersionPath(t *testing.T) {
 	if completeCond.Status != metav1.ConditionFalse {
 		t.Errorf("expected Complete=False, got %s", completeCond.Status)
 	}
-	// The missing version path is now caught during the Git diff preview (preflight)
-	if completeCond.Reason != "PreflightFailed" {
-		t.Errorf("expected reason PreflightFailed, got %s", completeCond.Reason)
+	// The missing version path is caught during the Git diff preview
+	if completeCond.Reason != "MissingVersionPath" {
+		t.Errorf("expected reason MissingVersionPath, got %s", completeCond.Reason)
 	}
 }
 

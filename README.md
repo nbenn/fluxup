@@ -4,7 +4,9 @@
 [![docs](https://github.com/nbenn/fluxup/actions/workflows/docs.yml/badge.svg)](https://nbenn.github.io/fluxup/)
 [![codecov](https://codecov.io/gh/nbenn/fluxup/graph/badge.svg?token=HQVI1MAAQT)](https://codecov.io/gh/nbenn/fluxup)
 
-A Kubernetes controller for managing application upgrades in GitOps-based clusters. FluxUp leverages **Renovate** for version detection, commits updates to **Git** (source of truth), creates **CSI snapshots** before upgrades, and provides a UI for monitoring and rollback.
+A Kubernetes controller for managing application upgrades in GitOps-based clusters. FluxUp leverages **Renovate** for version detection, commits updates to **Git** (source of truth), and creates **CSI snapshots** before upgrades for safe rollback.
+
+> **Note:** FluxUp is in early development (`v1alpha1`). The API may change between releases.
 
 ## Features
 
@@ -12,8 +14,17 @@ A Kubernetes controller for managing application upgrades in GitOps-based cluste
 - **GitOps-native** - Commits version changes to Git, letting Flux handle reconciliation
 - **Pre-upgrade Snapshots** - Creates CSI VolumeSnapshots before applying updates
 - **Controlled Upgrades** - Suspends Flux during snapshot creation to ensure data safety
-- **Rollback Support** - Quick rollback using snapshots if upgrades fail
-- **Web UI** - Dashboard for viewing pending updates, triggering upgrades, and managing rollbacks
+- **Rollback Support** - Quick rollback using snapshots and Git revert if upgrades fail
+- **Dry Run with Preflight** - Validates infrastructure prerequisites and exercises the full suspend/scale cycle before committing
+- **Auto-discovery** - Automatically discovers PVCs and workloads from HelmRelease or Kustomization inventory
+
+### Supported Git Backends
+
+| Backend | Status |
+|---------|--------|
+| **Gitea** | Supported |
+| GitHub | Planned |
+| GitLab | Planned |
 
 ## Quick Start
 
@@ -21,7 +32,8 @@ A Kubernetes controller for managing application upgrades in GitOps-based cluste
 
 - Kubernetes cluster (v1.26+)
 - [Flux CD](https://fluxcd.io/) installed and configured
-- A Git repository with your application manifests
+- A Git repository with your application manifests (hosted on Gitea)
+- CSI driver with snapshot support (optional, for pre-upgrade snapshots)
 
 ### Installation
 
@@ -79,8 +91,10 @@ Full documentation is available at **[nbenn.github.io/fluxup](https://nbenn.gith
 - [Getting Started](https://nbenn.github.io/fluxup/guides/getting-started/)
 - [Configuration Guide](https://nbenn.github.io/fluxup/guides/configuration/)
 - [Triggering Upgrades](https://nbenn.github.io/fluxup/guides/upgrades/)
+- [Rollback Guide](https://nbenn.github.io/fluxup/guides/rollback/)
 - [ManagedApp Reference](https://nbenn.github.io/fluxup/reference/managedapp/)
 - [UpgradeRequest Reference](https://nbenn.github.io/fluxup/reference/upgraderequest/)
+- [RollbackRequest Reference](https://nbenn.github.io/fluxup/reference/rollbackrequest/)
 - [Renovate Integration](https://nbenn.github.io/fluxup/guides/renovate/)
 
 ## Development

@@ -34,11 +34,28 @@ kind: RollbackRequest
 | Field | Type | Description |
 |-------|------|-------------|
 | `restoredFrom` | RestoredFromStatus | Information about what was restored |
+| `scaling` | ScalingStatus | Workload scaling details (workloads scaled down before volume restore) |
 | `volumeRestore` | VolumeRestoreStatus | PVC restoration details |
 | `gitRevert` | GitRevertStatus | Git revert details |
 | `startedAt` | Time | When rollback started |
 | `completedAt` | Time | When rollback completed |
+| `phaseStartedAt` | Time | When the current phase began (used for per-phase timeout calculations) |
 | `conditions` | []Condition | Progress and state conditions |
+
+### ScalingStatus
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `workloads` | []WorkloadScalingInfo | List of workloads that were scaled down |
+| `scaledDownAt` | Time | When scale-down completed for all workloads |
+
+### WorkloadScalingInfo
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `kind` | string | Kind of the workload (Deployment, StatefulSet) |
+| `name` | string | Name of the workload |
+| `namespace` | string | Namespace of the workload |
 
 ### RestoredFromStatus
 
@@ -76,7 +93,7 @@ kind: RollbackRequest
 | Type | Description |
 |------|-------------|
 | `Suspended` | Flux Kustomization has been suspended |
-| `WorkloadStopped` | Workload has been stopped (reason: `WorkloadStopped` or `Skipped` if no workloadRef) |
+| `WorkloadStopped` | Workloads mounting target PVCs have been scaled to 0 |
 | `VolumesRestored` | PVCs have been restored from snapshots |
 | `GitReverted` | Version has been reverted in Git |
 | `Reconciled` | Flux has reconciled the changes |
@@ -100,7 +117,7 @@ spec:
 
 ### Dry Run
 
-Validate a rollback without applying changes:
+Validate a rollback and exercise the suspend/scale cycle without making Git or snapshot changes:
 
 ```yaml
 apiVersion: fluxup.dev/v1alpha1
@@ -113,6 +130,8 @@ spec:
     name: my-app-upgrade-20240115
   dryRun: true
 ```
+
+The dry run performs preflight checks, previews the Git diff, then exercises the full quiescence cycle (suspend, scale down, scale up, resume) to verify the infrastructure works. See the [Rollback Guide](../guides/rollback.md#dry-run) for details.
 
 ### Auto-Triggered Rollback
 
@@ -166,12 +185,16 @@ kubectl get rollbackrequest my-app-rollback -o jsonpath='{.status.conditions}'
 The rollback proceeds through these steps:
 
 1. **Validate** - Check UpgradeRequest exists and is terminal (completed or failed)
-2. **Suspend** - Suspend the Flux Kustomization to prevent reconciliation
-3. **Stop Workload** - Scale workload to 0 replicas (if workloadRef configured)
-4. **Restore Volumes** - Delete current PVCs and recreate from snapshots
-5. **Revert Git** - Commit the previous version back to Git
-6. **Resume Flux** - Resume the Kustomization to trigger reconciliation
-7. **Health Check** - Wait for workload to become healthy
+2. **Preflight** - Validate suspend target, check snapshot existence, discover workloads
+3. **Git diff preview** - Log the version revert that will be applied
+4. **Suspend** - Suspend the Flux Kustomization to prevent reconciliation (2 min timeout)
+5. **Stop Workloads** - Scale down auto-discovered workloads mounting target PVCs (5 min timeout)
+6. **Restore Volumes** - Delete current PVCs and recreate from snapshots (30 min timeout)
+7. **Revert Git** - Commit the previous version back to Git (2 min timeout)
+8. **Resume & Reconcile** - Resume the Kustomization and wait for Flux to reconcile (10 min timeout)
+9. **Health Check** - Wait for workloads to become healthy (5 min timeout, configurable)
+
+Each phase has an independent timeout tracked via `phaseStartedAt`.
 
 ## Preconditions
 

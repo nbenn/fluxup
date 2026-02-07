@@ -41,10 +41,11 @@ kind: UpgradeRequest
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `scaling` | ScalingStatus | Workload scaling details (if workloadRef configured) |
+| `scaling` | ScalingStatus | Workload scaling details (auto-discovered workloads mounting target PVCs) |
 | `snapshot` | SnapshotStatus | Pre-upgrade snapshot details |
 | `upgrade` | UpgradeStatus | Upgrade operation details |
 | `healthCheck` | HealthCheckStatus | Health check results |
+| `phaseStartedAt` | Time | When the current phase began (used for per-phase timeout calculations) |
 | `conditions` | []Condition | Progress and state conditions |
 
 ### ScalingStatus
@@ -149,6 +150,8 @@ spec:
 
 ### Dry Run
 
+Validate an upgrade and exercise the suspend/scale cycle without making Git or snapshot changes:
+
 ```yaml
 apiVersion: fluxup.dev/v1alpha1
 kind: UpgradeRequest
@@ -160,6 +163,8 @@ spec:
     name: my-app
   dryRun: true
 ```
+
+The dry run performs preflight checks (validates suspend target, discovers PVCs/workloads, verifies VolumeSnapshotClass), previews the Git diff, then exercises the full quiescence cycle (suspend, scale down, scale up, resume). See the [Upgrades Guide](../guides/upgrades.md#dry-run) for details.
 
 ### Skip Snapshots
 
@@ -200,3 +205,32 @@ kubectl describe upgraderequest my-app-upgrade
 ```bash
 kubectl get upgraderequest my-app-upgrade -o jsonpath='{.status.conditions}'
 ```
+
+## Upgrade Workflow
+
+The upgrade proceeds through these steps:
+
+1. **Validate** - Check ManagedApp exists and an update is available
+2. **Preflight** - Validate suspend target, discover PVCs/workloads, verify VolumeSnapshotClass
+3. **Git diff preview** - Log the version change that will be applied
+4. **Suspend** - Suspend the Flux Kustomization to prevent reconciliation (2 min timeout)
+5. **Scale down** - Scale down auto-discovered workloads mounting target PVCs (5 min timeout)
+6. **Snapshot** - Create CSI VolumeSnapshots of target PVCs (30 min timeout)
+7. **Git commit** - Commit the version change to Git (2 min timeout) -- **point of no return**
+8. **Resume & Reconcile** - Resume the Kustomization and wait for Flux to reconcile (10 min timeout)
+9. **Health Check** - Wait for workloads to become healthy (5 min timeout, configurable)
+
+Each phase has an independent timeout tracked via `phaseStartedAt`.
+
+## Failure Handling
+
+How FluxUp handles failures depends on when the failure occurs:
+
+- **Before Git commit:** Flux Kustomization is automatically resumed, no changes made to Git. You can fix the issue and retry.
+- **After Git commit:** The new version is already in Git. A rollback is required (manual or auto-triggered if `autoRollback: true` on ManagedApp).
+
+## Next Steps
+
+- [Triggering Upgrades](../guides/upgrades.md) - Detailed upgrade guide with troubleshooting
+- [Rollback Guide](../guides/rollback.md) - How to rollback failed upgrades
+- [RollbackRequest Reference](rollbackrequest.md) - Full rollback CRD specification

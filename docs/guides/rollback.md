@@ -11,9 +11,11 @@ This guide explains how to rollback applications to their previous version using
 
 FluxUp rollbacks restore an application to its pre-upgrade state by:
 
-1. Restoring PVCs from the pre-upgrade snapshots
-2. Reverting the version in Git to the previous value
-3. Letting Flux reconcile the changes
+1. Suspending Flux reconciliation
+2. Scaling down workloads that mount the target PVCs
+3. Deleting current PVCs and restoring them from pre-upgrade snapshots
+4. Reverting the version in Git to the previous value
+5. Resuming Flux and waiting for reconciliation and health checks
 
 ## When to Rollback
 
@@ -135,7 +137,7 @@ This means data changes made by the new version will **not** be reverted.
 
 ## Dry Run
 
-Validate a rollback without applying changes:
+A dry run validates your rollback configuration and exercises the full suspend/scale cycle without making any Git or snapshot changes. This is useful for verifying that the rollback infrastructure works before you need it in an incident.
 
 ```yaml
 apiVersion: fluxup.dev/v1alpha1
@@ -148,11 +150,43 @@ spec:
   dryRun: true
 ```
 
-A successful dry run verifies:
+### What the Dry Run Does
 
-- The UpgradeRequest exists and is terminal
-- Snapshots are available
-- Previous version is recorded
+**Preflight checks** (read-only cluster validation):
+
+- Validates the UpgradeRequest exists and is terminal
+- Verifies snapshots still exist and are ready (not garbage-collected)
+- Validates the Flux suspend target exists and is a root Kustomization
+- Checks Kustomization health (warns if not Ready)
+- Discovers workloads that mount the target PVCs
+
+**Git diff preview** (logged, no commit):
+
+- Reads the current file from Git
+- Computes what the version revert would look like
+- Logs the current and target versions
+
+**Quiescence cycle** (real cluster mutations):
+
+- Suspends the Flux Kustomization
+- Scales down discovered workloads to 0
+- Verifies all pods terminated
+- Scales workloads back up to original replica counts
+- Resumes the Flux Kustomization
+
+> **Important:** The dry run briefly takes the application offline during the quiescence cycle. Run dry runs during maintenance windows.
+
+### Interpreting Results
+
+A successful dry run sets the `Complete` condition with reason `DryRunSucceeded` and a summary message:
+
+```
+Dry run passed. Would rollback gitea from 2.0.0 to 1.0.0.
+Preflight: Kustomization flux-system/gitea-ks Ready. 2 snapshots verified.
+Suspend/resume: verified. Scale down/up: verified (StatefulSet/redis).
+```
+
+A failed dry run sets reason `DryRunFailed` with details about what went wrong.
 
 ## Troubleshooting
 
@@ -256,11 +290,12 @@ This is the most critical failure scenario. If rollback fails after PVCs are del
 
 ## Best Practices
 
-1. **Enable autoRollback for critical apps** - Reduces recovery time when upgrades fail
-2. **Don't skip snapshots in production** - Snapshots enable data recovery
-3. **Test rollbacks in staging** - Verify your rollback process works before you need it
-4. **Monitor rollback duration** - Long rollbacks may indicate storage or reconciliation issues
-5. **Keep enough snapshot retention** - Ensure `retentionPolicy.maxCount` allows rollback to recent versions
+1. **Run dry runs first** - Verify the suspend/scale cycle works before you need it in an incident
+2. **Enable autoRollback for critical apps** - Reduces recovery time when upgrades fail
+3. **Don't skip snapshots in production** - Snapshots enable data recovery
+4. **Test rollbacks in staging** - Verify your rollback process works before you need it
+5. **Monitor rollback duration** - Long rollbacks may indicate storage or reconciliation issues
+6. **Keep enough snapshot retention** - Ensure `retentionPolicy.maxCount` allows rollback to recent versions
 
 ## Next Steps
 
