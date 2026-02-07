@@ -80,6 +80,141 @@ func (r *RollbackRequestReconciler) isPhaseTimedOut(rollback *fluxupv1alpha1.Rol
 	return time.Since(rollback.Status.PhaseStartedAt.Time) > timeout
 }
 
+// runRollbackPreflight runs read-only preflight checks for a rollback operation.
+func (r *RollbackRequestReconciler) runRollbackPreflight(ctx context.Context, app *fluxupv1alpha1.ManagedApp, upgrade *fluxupv1alpha1.UpgradeRequest) (*preflightResult, error) {
+	logger := logging.FromContext(ctx)
+	result := &preflightResult{}
+
+	// --- Flux preflight ---
+
+	ksRef := app.Spec.KustomizationRef
+	ksNS := ksRef.Namespace
+	if ksNS == "" {
+		ksNS = DefaultFluxNamespace
+	}
+
+	if err := r.FluxHelper.ValidateSuspendTarget(ctx,
+		&struct{ Name, Namespace string }{Name: ksRef.Name, Namespace: ksNS},
+		r.getSuspendRefStruct(app)); err != nil {
+		return nil, fmt.Errorf("invalid suspend target: %w", err)
+	}
+
+	reconciled, err := r.FluxHelper.IsReconciled(ctx, ksRef.Name, ksNS)
+	if err != nil {
+		logger.Warn("preflight: could not check Kustomization health", "error", err)
+	} else if !reconciled {
+		msg := fmt.Sprintf("Kustomization %s/%s is not Ready — operation may fail at reconciliation", ksNS, ksRef.Name)
+		logger.Warn("preflight: " + msg)
+		result.Warnings = append(result.Warnings, msg)
+	}
+
+	suspendName, suspendNS := r.getSuspendTarget(app)
+	suspended, err := r.FluxHelper.IsSuspended(ctx, suspendName, suspendNS)
+	if err != nil {
+		logger.Warn("preflight: could not check Kustomization suspension state", "error", err)
+	} else if suspended {
+		msg := fmt.Sprintf("Kustomization %s/%s is already suspended — operation will resume it upon completion", suspendNS, suspendName)
+		logger.Warn("preflight: " + msg)
+		result.Warnings = append(result.Warnings, msg)
+	}
+
+	ksStatus := "Ready"
+	if !reconciled {
+		ksStatus = reasonNotReady
+	}
+
+	// --- Snapshot restore preflight (when snapshots present) ---
+	hasSnapshots := upgrade.Status.Snapshot != nil && len(upgrade.Status.Snapshot.PVCSnapshots) > 0 && !upgrade.Spec.SkipSnapshot
+
+	if hasSnapshots {
+		// Verify each snapshot still exists and is ready
+		for _, snap := range upgrade.Status.Snapshot.PVCSnapshots {
+			ready, err := r.SnapshotManager.IsSnapshotReady(ctx, snap.SnapshotName, app.Namespace)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot %s no longer exists or cannot be checked: %w", snap.SnapshotName, err)
+			}
+			if !ready {
+				return nil, fmt.Errorf("snapshot %s is not ready", snap.SnapshotName)
+			}
+		}
+
+		// Discover workloads for PVCs
+		pvcNames := make([]string, len(upgrade.Status.Snapshot.PVCSnapshots))
+		for i, snap := range upgrade.Status.Snapshot.PVCSnapshots {
+			pvcNames[i] = snap.PVCName
+		}
+
+		workloads, err := r.Discoverer.DiscoverWorkloadsForPVCs(ctx, pvcNames, app.Namespace)
+		if err != nil {
+			return nil, fmt.Errorf("workload discovery for PVCs failed: %w", err)
+		}
+		result.Workloads = workloads
+
+		if len(workloads) == 0 {
+			logger.Info("preflight: no workloads discovered mounting the PVCs")
+		} else {
+			wNames := make([]string, len(workloads))
+			for i, w := range workloads {
+				wNames[i] = w.Kind + "/" + w.Name
+			}
+			logger.Info("preflight: workloads to scale down before PVC restore", "count", len(workloads), "workloads", wNames)
+		}
+
+		result.Summary = append(result.Summary, fmt.Sprintf("Kustomization %s/%s %s. %d snapshots to restore, %d workloads to scale",
+			ksNS, ksRef.Name, ksStatus, len(upgrade.Status.Snapshot.PVCSnapshots), len(workloads)))
+	} else {
+		result.Summary = append(result.Summary, fmt.Sprintf("Kustomization %s/%s %s. No snapshots to restore",
+			ksNS, ksRef.Name, ksStatus))
+	}
+
+	return result, nil
+}
+
+// runRollbackGitDiffPreview reads the current file and computes the version revert without committing.
+func (r *RollbackRequestReconciler) runRollbackGitDiffPreview(ctx context.Context, app *fluxupv1alpha1.ManagedApp, upgrade *fluxupv1alpha1.UpgradeRequest) (currentVersion, revertVersion, versionPath string, err error) {
+	logger := logging.FromContext(ctx)
+
+	targetVersion := upgrade.Status.Upgrade.PreviousVersion
+	if targetVersion == nil {
+		return "", "", "", fmt.Errorf("no previous version recorded")
+	}
+
+	versionPath = yamlpkg.DefaultHelmReleaseVersionPath
+	if app.Spec.VersionPolicy != nil && app.Spec.VersionPolicy.VersionPath != "" {
+		versionPath = app.Spec.VersionPolicy.VersionPath
+	}
+
+	if targetVersion.Chart != "" {
+		revertVersion = targetVersion.Chart
+	} else if len(targetVersion.Images) > 0 {
+		revertVersion = targetVersion.Images[0].Tag
+	} else {
+		return "", "", "", fmt.Errorf("no chart version or images in previous version")
+	}
+
+	content, err := r.GitManager.ReadFile(ctx, app.Spec.GitPath)
+	if err != nil {
+		return "", "", "", fmt.Errorf("cannot read Git file %s: %w", app.Spec.GitPath, err)
+	}
+
+	currentVersion, err = r.YAMLEditor.GetVersion(content, versionPath)
+	if err != nil {
+		return "", "", "", fmt.Errorf("cannot read version at path %s: %w", versionPath, err)
+	}
+
+	if _, err := r.YAMLEditor.UpdateVersion(content, versionPath, revertVersion); err != nil {
+		return "", "", "", fmt.Errorf("version revert would produce invalid YAML: %w", err)
+	}
+
+	logger.Info("version change preview",
+		"file", app.Spec.GitPath,
+		"path", versionPath,
+		"current", currentVersion,
+		"target", revertVersion)
+
+	return currentVersion, revertVersion, versionPath, nil
+}
+
 // +kubebuilder:rbac:groups=fluxup.dev,resources=rollbackrequests,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=fluxup.dev,resources=rollbackrequests/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=fluxup.dev,resources=rollbackrequests/finalizers,verbs=update
@@ -170,38 +305,285 @@ func (r *RollbackRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return r.handleCompleted(ctx, &rollback)
 }
 
-// handleDryRun validates the rollback without making any changes
+// handleDryRun validates the rollback and exercises the suspend/scale cycle without restoring.
 func (r *RollbackRequestReconciler) handleDryRun(ctx context.Context, rollback *fluxupv1alpha1.RollbackRequest) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("processing dry run")
 
-	// Fetch the UpgradeRequest
+	// --- Initial validation (existing) ---
+
 	upgrade, err := r.getUpgradeRequest(ctx, rollback)
 	if err != nil {
 		return r.setFailed(ctx, rollback, "UpgradeRequestNotFound", err.Error())
 	}
 
-	// Verify upgrade is terminal
 	if !r.isUpgradeTerminal(upgrade) {
 		return r.setFailed(ctx, rollback, "UpgradeInProgress", "Cannot rollback an in-progress upgrade")
 	}
 
-	// Verify upgrade has snapshot info
 	if upgrade.Status.Snapshot == nil || len(upgrade.Status.Snapshot.PVCSnapshots) == 0 {
 		return r.setFailed(ctx, rollback, "NoSnapshotsAvailable", "UpgradeRequest has no snapshots to restore from")
 	}
 
-	// Verify previous version is recorded
 	if upgrade.Status.Upgrade == nil || upgrade.Status.Upgrade.PreviousVersion == nil {
 		return r.setFailed(ctx, rollback, "NoPreviousVersion", "UpgradeRequest has no previous version recorded")
 	}
 
-	// Mark as complete (dry run successful)
+	app, err := r.getManagedApp(ctx, upgrade)
+	if err != nil {
+		return r.setFailed(ctx, rollback, "ManagedAppNotFound", err.Error())
+	}
+
+	// --- Git diff preview (NEW — all operations) ---
+
+	var currentVersion, revertVersion, versionPath string
+	if r.GitManager != nil {
+		currentVersion, revertVersion, versionPath, err = r.runRollbackGitDiffPreview(ctx, app, upgrade)
+		if err != nil {
+			return r.setFailed(ctx, rollback, "PreflightFailed", err.Error())
+		}
+	}
+
+	// --- Preflight checks (NEW — all operations) ---
+
+	preflight, err := r.runRollbackPreflight(ctx, app, upgrade)
+	if err != nil {
+		return r.setFailed(ctx, rollback, "PreflightFailed", err.Error())
+	}
+
+	// --- Dry-run quiescence cycle (NEW — dry-run only) ---
+
+	return r.runRollbackDryRunQuiescence(ctx, rollback, app, preflight, currentVersion, revertVersion, versionPath)
+}
+
+// runRollbackDryRunQuiescence exercises the suspend/scale cycle for rollback dry-run.
+func (r *RollbackRequestReconciler) runRollbackDryRunQuiescence(
+	ctx context.Context,
+	rollback *fluxupv1alpha1.RollbackRequest,
+	app *fluxupv1alpha1.ManagedApp,
+	preflight *preflightResult,
+	currentVersion, revertVersion, versionPath string,
+) (ctrl.Result, error) {
+	suspendName, suspendNS := r.getSuspendTarget(app)
+
+	// Phase 1: Suspend Kustomization
+	if !meta.IsStatusConditionTrue(rollback.Status.Conditions, fluxupv1alpha1.ConditionTypeSuspended) {
+		return r.rollbackDryRunSuspend(ctx, rollback, app, suspendName, suspendNS)
+	}
+
+	// Phase 2: Scale down workloads (if any discovered)
+	if len(preflight.Workloads) > 0 && !meta.IsStatusConditionTrue(rollback.Status.Conditions, fluxupv1alpha1.ConditionTypeWorkloadStopped) {
+		return r.rollbackDryRunScaleDown(ctx, rollback, app, preflight.Workloads)
+	}
+
+	// Phase 3: Verify still suspended, then scale up
+	if len(preflight.Workloads) > 0 && !meta.IsStatusConditionTrue(rollback.Status.Conditions, fluxupv1alpha1.ConditionTypeVolumesRestored) {
+		return r.rollbackDryRunScaleUp(ctx, rollback, app, preflight.Workloads, suspendName, suspendNS)
+	}
+
+	// Phase 4: Resume Kustomization and complete
+	return r.rollbackDryRunResumeAndComplete(ctx, rollback, app, preflight, suspendName, suspendNS, currentVersion, revertVersion, versionPath)
+}
+
+// rollbackDryRunSuspend handles Phase 1 of the rollback dry-run: suspending the Kustomization.
+func (r *RollbackRequestReconciler) rollbackDryRunSuspend(
+	ctx context.Context,
+	rollback *fluxupv1alpha1.RollbackRequest,
+	app *fluxupv1alpha1.ManagedApp,
+	suspendName, suspendNS string,
+) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+	r.setPhaseStartIfNeeded(rollback)
+
+	if err := r.FluxHelper.SuspendKustomization(ctx, suspendName, suspendNS); err != nil {
+		if r.isPhaseTimedOut(rollback, TimeoutSuspend) {
+			return r.setRollbackDryRunFailed(ctx, rollback, app, fmt.Sprintf("Suspend timed out: %v", err))
+		}
+		if err := r.Status().Update(ctx, rollback); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	suspended, err := r.FluxHelper.IsSuspended(ctx, suspendName, suspendNS)
+	if err != nil || !suspended {
+		if r.isPhaseTimedOut(rollback, TimeoutSuspend) {
+			return r.setRollbackDryRunFailed(ctx, rollback, app, "Suspend verification timed out")
+		}
+		if err := r.Status().Update(ctx, rollback); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	r.resetPhaseStart(rollback)
+	logger.Info("dry run: Kustomization suspended")
+
+	meta.SetStatusCondition(&rollback.Status.Conditions, metav1.Condition{
+		Type:               fluxupv1alpha1.ConditionTypeSuspended,
+		Status:             metav1.ConditionTrue,
+		Reason:             "DryRunSuspended",
+		Message:            fmt.Sprintf("Dry run: suspended %s/%s", suspendNS, suspendName),
+		ObservedGeneration: rollback.Generation,
+	})
+
+	if err := r.Status().Update(ctx, rollback); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// rollbackDryRunScaleDown handles Phase 2: scaling down workloads with RWO PVCs.
+func (r *RollbackRequestReconciler) rollbackDryRunScaleDown(
+	ctx context.Context,
+	rollback *fluxupv1alpha1.RollbackRequest,
+	app *fluxupv1alpha1.ManagedApp,
+	workloads []discovery.WorkloadInfo,
+) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+	r.setPhaseStartIfNeeded(rollback)
+
+	for _, w := range workloads {
+		ns := workloadNS(w, app.Namespace)
+		if _, err := r.WorkloadScaler.ScaleDown(ctx, w.Kind, w.Name, ns); err != nil {
+			return r.setRollbackDryRunFailed(ctx, rollback, app, fmt.Sprintf("Scale down failed for %s/%s: %v", w.Kind, w.Name, err))
+		}
+	}
+
+	allDown, err := r.allWorkloadsScaledDown(ctx, workloads, app.Namespace)
+	if err != nil {
+		return r.setRollbackDryRunFailed(ctx, rollback, app, fmt.Sprintf("Scale down check failed: %v", err))
+	}
+	if !allDown {
+		if r.isPhaseTimedOut(rollback, TimeoutScaleDown) {
+			return r.setRollbackDryRunFailed(ctx, rollback, app, "Scale down timed out")
+		}
+		if err := r.Status().Update(ctx, rollback); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	r.resetPhaseStart(rollback)
+	logger.Info("dry run: workloads scaled down", "count", len(workloads))
+
+	meta.SetStatusCondition(&rollback.Status.Conditions, metav1.Condition{
+		Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
+		Status:             metav1.ConditionTrue,
+		Reason:             "DryRunScaledDown",
+		Message:            fmt.Sprintf("Dry run: scaled down %d workloads", len(workloads)),
+		ObservedGeneration: rollback.Generation,
+	})
+
+	if err := r.Status().Update(ctx, rollback); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// rollbackDryRunScaleUp handles Phase 3: verifying suspension, scaling up, and re-verifying.
+func (r *RollbackRequestReconciler) rollbackDryRunScaleUp(
+	ctx context.Context,
+	rollback *fluxupv1alpha1.RollbackRequest,
+	app *fluxupv1alpha1.ManagedApp,
+	workloads []discovery.WorkloadInfo,
+	suspendName, suspendNS string,
+) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+
+	if err := r.FluxHelper.VerifyStillSuspended(ctx, suspendName, suspendNS); err != nil {
+		return r.setRollbackDryRunFailed(ctx, rollback, app, fmt.Sprintf("External interference detected before scale-up: %v", err))
+	}
+
+	r.setPhaseStartIfNeeded(rollback)
+
+	for _, w := range workloads {
+		ns := workloadNS(w, app.Namespace)
+		if err := r.WorkloadScaler.ScaleUp(ctx, w.Kind, w.Name, ns, 1); err != nil {
+			return r.setRollbackDryRunFailed(ctx, rollback, app, fmt.Sprintf("Scale up failed for %s/%s: %v", w.Kind, w.Name, err))
+		}
+	}
+
+	allDown, err := r.allWorkloadsScaledDown(ctx, workloads, app.Namespace)
+	if err != nil {
+		return r.setRollbackDryRunFailed(ctx, rollback, app, fmt.Sprintf("Scale up check failed: %v", err))
+	}
+	if allDown {
+		// Not all scaled up yet
+		if r.isPhaseTimedOut(rollback, TimeoutScaleUp) {
+			return r.setRollbackDryRunFailed(ctx, rollback, app, "Scale up timed out")
+		}
+		if err := r.Status().Update(ctx, rollback); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	r.resetPhaseStart(rollback)
+	logger.Info("dry run: workloads scaled back up", "count", len(workloads))
+
+	if err := r.FluxHelper.VerifyStillSuspended(ctx, suspendName, suspendNS); err != nil {
+		return r.setRollbackDryRunFailed(ctx, rollback, app, fmt.Sprintf("External interference detected after scale-up: %v", err))
+	}
+
+	// Reuse VolumesRestored to signal scale-up complete in dry-run
+	meta.SetStatusCondition(&rollback.Status.Conditions, metav1.Condition{
+		Type:               fluxupv1alpha1.ConditionTypeVolumesRestored,
+		Status:             metav1.ConditionTrue,
+		Reason:             "DryRunScaledUp",
+		Message:            fmt.Sprintf("Dry run: scaled up %d workloads", len(workloads)),
+		ObservedGeneration: rollback.Generation,
+	})
+
+	if err := r.Status().Update(ctx, rollback); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// rollbackDryRunResumeAndComplete handles Phase 4: resuming the Kustomization and building the summary.
+func (r *RollbackRequestReconciler) rollbackDryRunResumeAndComplete(
+	ctx context.Context,
+	rollback *fluxupv1alpha1.RollbackRequest,
+	app *fluxupv1alpha1.ManagedApp,
+	preflight *preflightResult,
+	suspendName, suspendNS string,
+	currentVersion, revertVersion, versionPath string,
+) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+	r.setPhaseStartIfNeeded(rollback)
+
+	if err := r.FluxHelper.ResumeKustomization(ctx, suspendName, suspendNS); err != nil {
+		if r.isPhaseTimedOut(rollback, TimeoutResume) {
+			return r.setRollbackDryRunFailed(ctx, rollback, app, fmt.Sprintf("Resume timed out: %v", err))
+		}
+		if err := r.Status().Update(ctx, rollback); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	suspended, err := r.FluxHelper.IsSuspended(ctx, suspendName, suspendNS)
+	if err != nil || suspended {
+		if r.isPhaseTimedOut(rollback, TimeoutResume) {
+			return r.setRollbackDryRunFailed(ctx, rollback, app, "Resume verification timed out")
+		}
+		if err := r.Status().Update(ctx, rollback); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	r.resetPhaseStart(rollback)
+	logger.Info("dry run: Kustomization resumed")
+
+	message := buildDryRunSummary("rollback", preflight, currentVersion, revertVersion, versionPath, app.Spec.GitPath)
+
 	meta.SetStatusCondition(&rollback.Status.Conditions, metav1.Condition{
 		Type:               fluxupv1alpha1.ConditionTypeComplete,
 		Status:             metav1.ConditionTrue,
 		Reason:             "DryRunSucceeded",
-		Message:            fmt.Sprintf("Dry run validation passed. Would rollback to %s", r.getVersionString(upgrade.Status.Upgrade.PreviousVersion)),
+		Message:            message,
 		ObservedGeneration: rollback.Generation,
 	})
 
@@ -209,7 +591,6 @@ func (r *RollbackRequestReconciler) handleDryRun(ctx context.Context, rollback *
 		return ctrl.Result{}, err
 	}
 
-	// Remove finalizer for dry run
 	if controllerutil.ContainsFinalizer(rollback, OperationFinalizer) {
 		controllerutil.RemoveFinalizer(rollback, OperationFinalizer)
 		if err := r.Update(ctx, rollback); err != nil {
@@ -218,6 +599,38 @@ func (r *RollbackRequestReconciler) handleDryRun(ctx context.Context, rollback *
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// allWorkloadsScaledDown checks if all workloads in the list are scaled to zero.
+func (r *RollbackRequestReconciler) allWorkloadsScaledDown(ctx context.Context, workloads []discovery.WorkloadInfo, defaultNS string) (bool, error) {
+	for _, w := range workloads {
+		ns := workloadNS(w, defaultNS)
+		down, err := r.WorkloadScaler.IsScaledDown(ctx, w.Kind, w.Name, ns)
+		if err != nil {
+			return false, err
+		}
+		if !down {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// setRollbackDryRunFailed marks the rollback dry-run as failed, attempting to resume the Kustomization first.
+func (r *RollbackRequestReconciler) setRollbackDryRunFailed(ctx context.Context, rollback *fluxupv1alpha1.RollbackRequest, app *fluxupv1alpha1.ManagedApp, message string) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+
+	if meta.IsStatusConditionTrue(rollback.Status.Conditions, fluxupv1alpha1.ConditionTypeSuspended) {
+		suspendName, suspendNS := r.getSuspendTarget(app)
+		if resumeErr := r.FluxHelper.ResumeKustomization(ctx, suspendName, suspendNS); resumeErr != nil {
+			logger.Error("dry run: failed to resume Kustomization during cleanup", "error", resumeErr)
+			message = fmt.Sprintf("%s (WARNING: Kustomization may still be suspended — manual resume required)", message)
+		} else {
+			logger.Info("dry run: resumed Kustomization during cleanup")
+		}
+	}
+
+	return r.setFailed(ctx, rollback, "DryRunFailed", message)
 }
 
 // handleSuspend validates the request and suspends Flux
@@ -266,6 +679,18 @@ func (r *RollbackRequestReconciler) handleSuspend(ctx context.Context, rollback 
 		RolledBackVersion:  upgrade.Status.Upgrade.NewVersion,
 	}
 
+	// --- Git diff preview (runs for all operations) ---
+	if r.GitManager != nil {
+		if _, _, _, err := r.runRollbackGitDiffPreview(ctx, app, upgrade); err != nil {
+			return r.setFailed(ctx, rollback, "PreflightFailed", err.Error())
+		}
+	}
+
+	// --- Preflight checks (runs for all operations) ---
+	if _, err := r.runRollbackPreflight(ctx, app, upgrade); err != nil {
+		return r.setFailed(ctx, rollback, "PreflightFailed", err.Error())
+	}
+
 	logger.Info("starting rollback",
 		"app", app.Name,
 		"fromVersion", r.getVersionString(upgrade.Status.Upgrade.NewVersion),
@@ -273,19 +698,6 @@ func (r *RollbackRequestReconciler) handleSuspend(ctx context.Context, rollback 
 
 	// Determine which Kustomization to suspend (suspendRef or kustomizationRef)
 	suspendName, suspendNS := r.getSuspendTarget(app)
-
-	// Validate suspend target is appropriate (root if no explicit suspendRef)
-	ksRef := app.Spec.KustomizationRef
-	ksNS := ksRef.Namespace
-	if ksNS == "" {
-		ksNS = DefaultFluxNamespace
-	}
-
-	if err := r.FluxHelper.ValidateSuspendTarget(ctx,
-		&struct{ Name, Namespace string }{Name: ksRef.Name, Namespace: ksNS},
-		r.getSuspendRefStruct(app)); err != nil {
-		return r.setFailed(ctx, rollback, "InvalidSuspendTarget", err.Error())
-	}
 
 	// Suspend Flux Kustomization
 	if err := r.FluxHelper.SuspendKustomization(ctx, suspendName, suspendNS); err != nil {

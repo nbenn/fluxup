@@ -222,6 +222,24 @@ func TestUpgradeRequest_NoUpdateAvailable(t *testing.T) {
 }
 
 func TestUpgradeRequest_DryRun(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
 	managedApp := &fluxupv1alpha1.ManagedApp{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-app",
@@ -253,7 +271,7 @@ func TestUpgradeRequest_DryRun(t *testing.T) {
 		},
 	}
 
-	r, mockGit := setupTestReconciler(t, managedApp, upgrade)
+	r, mockGit := setupTestReconciler(t, kustomization, managedApp, upgrade)
 	ctx := context.Background()
 
 	req := reconcile.Request{
@@ -263,8 +281,9 @@ func TestUpgradeRequest_DryRun(t *testing.T) {
 		},
 	}
 
-	// Reconcile until Complete condition is set (handles finalizer addition)
-	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+	// Reconcile until Complete condition is set
+	// Dry run now goes through: finalizer add → preflight + suspend → resume → complete
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 10); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -278,18 +297,36 @@ func TestUpgradeRequest_DryRun(t *testing.T) {
 		t.Fatal("expected Complete condition to be set")
 	}
 	if completeCond.Status != metav1.ConditionTrue {
-		t.Errorf("expected Complete=True for dry run, got %s", completeCond.Status)
+		t.Errorf("expected Complete=True for dry run, got %s (reason: %s, message: %s)",
+			completeCond.Status, completeCond.Reason, completeCond.Message)
 	}
 	if completeCond.Reason != reasonDryRunSucceeded {
 		t.Errorf("expected reason %s, got %s", reasonDryRunSucceeded, completeCond.Reason)
 	}
 
-	// Git should have been read but not committed
-	if len(mockGit.ReadFileCalls) != 1 {
-		t.Errorf("expected 1 read call, got %d", len(mockGit.ReadFileCalls))
+	// Verify the condition message includes version change info and preflight summary
+	if !stringContains(completeCond.Message, "1.0.0") || !stringContains(completeCond.Message, "2.0.0") {
+		t.Errorf("expected condition message to contain version info, got: %s", completeCond.Message)
+	}
+	if !stringContains(completeCond.Message, "suspend/resume: verified") {
+		t.Errorf("expected condition message to contain suspend/resume verification, got: %s", completeCond.Message)
+	}
+
+	// Git should have been read (for diff preview) but not committed
+	if len(mockGit.ReadFileCalls) < 1 {
+		t.Errorf("expected at least 1 read call, got %d", len(mockGit.ReadFileCalls))
 	}
 	if len(mockGit.CommitFileCalls) != 0 {
 		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+
+	// Kustomization should be resumed after dry run
+	var ks kustomizev1.Kustomization
+	if err := r.Get(ctx, types.NamespacedName{Name: "apps", Namespace: "flux-system"}, &ks); err != nil {
+		t.Fatalf("failed to get kustomization: %v", err)
+	}
+	if ks.Spec.Suspend {
+		t.Error("expected Kustomization to be resumed after dry run")
 	}
 }
 
@@ -649,8 +686,9 @@ func TestUpgradeRequest_ImageUpdateMissingVersionPath(t *testing.T) {
 	if completeCond.Status != metav1.ConditionFalse {
 		t.Errorf("expected Complete=False, got %s", completeCond.Status)
 	}
-	if completeCond.Reason != "MissingVersionPath" {
-		t.Errorf("expected reason MissingVersionPath, got %s", completeCond.Reason)
+	// The missing version path is now caught during the Git diff preview (preflight)
+	if completeCond.Reason != "PreflightFailed" {
+		t.Errorf("expected reason PreflightFailed, got %s", completeCond.Reason)
 	}
 }
 
@@ -2745,7 +2783,8 @@ func TestUpgradeRequest_DryRunWithCustomVersionPath(t *testing.T) {
 		},
 	}
 
-	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 5); err != nil {
+	// Dry run now goes through multiple phases
+	if err := reconcileUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 10); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -2759,7 +2798,8 @@ func TestUpgradeRequest_DryRunWithCustomVersionPath(t *testing.T) {
 		t.Fatal("expected Complete condition to be set")
 	}
 	if completeCond.Status != metav1.ConditionTrue {
-		t.Errorf("expected Complete=True, got %s", completeCond.Status)
+		t.Errorf("expected Complete=True, got %s (reason: %s, message: %s)",
+			completeCond.Status, completeCond.Reason, completeCond.Message)
 	}
 	if completeCond.Reason != reasonDryRunSucceeded {
 		t.Errorf("expected reason %s, got %s", reasonDryRunSucceeded, completeCond.Reason)
@@ -2770,9 +2810,9 @@ func TestUpgradeRequest_DryRunWithCustomVersionPath(t *testing.T) {
 		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
 	}
 
-	// Should have read the file to validate
-	if len(mockGit.ReadFileCalls) != 1 {
-		t.Errorf("expected 1 read call for validation, got %d", len(mockGit.ReadFileCalls))
+	// Should have read the file for diff preview (may be called multiple times across reconcile passes)
+	if len(mockGit.ReadFileCalls) < 1 {
+		t.Errorf("expected at least 1 read call for validation, got %d", len(mockGit.ReadFileCalls))
 	}
 }
 

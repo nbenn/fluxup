@@ -165,7 +165,7 @@ var _ = Describe("Upgrade Workflow", Ordered, func() {
 	AfterEach(func() {
 		if CurrentSpecReport().Failed() {
 			By("Fetching controller logs for debugging")
-			cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
+			cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace, "--tail=100")
 			logs, _ := utils.Run(cmd)
 			GinkgoWriter.Printf("Controller logs:\n%s\n", logs)
 		}
@@ -350,12 +350,6 @@ spec:
 				"-n", testNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-
-			// Log full status for debugging
-			cmd = exec.Command("kubectl", "get", "upgraderequest", managedAppName+"-upgrade",
-				"-n", testNamespace, "-o", "yaml")
-			fullOutput, _ := utils.Run(cmd)
-			GinkgoWriter.Printf("UpgradeRequest status:\n%s\n", fullOutput)
 
 			if output == "UpgradeSucceeded" {
 				By("verifying Git commit was made")

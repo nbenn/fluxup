@@ -24,6 +24,7 @@ import (
 	"time"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,6 +48,7 @@ func setupRollbackTestReconciler(_ *testing.T, objects ...client.Object) (*Rollb
 	_ = fluxupv1alpha1.AddToScheme(scheme)
 	_ = kustomizev1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
+	_ = snapshotv1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -56,6 +58,7 @@ func setupRollbackTestReconciler(_ *testing.T, objects ...client.Object) (*Rollb
 			&fluxupv1alpha1.UpgradeRequest{},
 			&fluxupv1alpha1.ManagedApp{},
 			&kustomizev1.Kustomization{},
+			&snapshotv1.VolumeSnapshot{},
 		).
 		Build()
 
@@ -93,7 +96,19 @@ func reconcileRollbackUntilCondition(
 	req reconcile.Request,
 	conditionType string,
 ) error {
-	for range 5 {
+	return reconcileRollbackUntilConditionN(ctx, r, req, conditionType, 5)
+}
+
+// reconcileRollbackUntilConditionN calls Reconcile repeatedly until the specified condition
+// is set or until maxIterations is reached.
+func reconcileRollbackUntilConditionN(
+	ctx context.Context,
+	r *RollbackRequestReconciler,
+	req reconcile.Request,
+	conditionType string,
+	maxIterations int,
+) error {
+	for range maxIterations {
 		_, err := r.Reconcile(ctx, req)
 		if err != nil {
 			return err
@@ -311,6 +326,24 @@ func TestRollbackRequest_NoSnapshotsAvailable(t *testing.T) {
 }
 
 func TestRollbackRequest_DryRun(t *testing.T) {
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "apps",
+			Namespace: "flux-system",
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			Suspend: false,
+		},
+		Status: kustomizev1.KustomizationStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
 	managedApp := &fluxupv1alpha1.ManagedApp{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-app",
@@ -326,6 +359,19 @@ func TestRollbackRequest_DryRun(t *testing.T) {
 	}
 
 	now := metav1.Now()
+	readyToUse := true
+
+	// Create the actual VolumeSnapshot object so preflight can verify it exists
+	snap := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snap-1",
+			Namespace: "default",
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{
+			ReadyToUse: &readyToUse,
+		},
+	}
+
 	upgrade := &fluxupv1alpha1.UpgradeRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-upgrade",
@@ -370,7 +416,7 @@ func TestRollbackRequest_DryRun(t *testing.T) {
 		},
 	}
 
-	r, mockGit := setupRollbackTestReconciler(t, managedApp, upgrade, rollback)
+	r, mockGit := setupRollbackTestReconciler(t, kustomization, managedApp, snap, upgrade, rollback)
 	ctx := context.Background()
 
 	req := reconcile.Request{
@@ -380,8 +426,8 @@ func TestRollbackRequest_DryRun(t *testing.T) {
 		},
 	}
 
-	// Reconcile until Complete condition is set
-	if err := reconcileRollbackUntilCondition(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete); err != nil {
+	// Dry run now goes through multiple phases: finalizer → preflight + suspend → resume → complete
+	if err := reconcileRollbackUntilConditionN(ctx, r, req, fluxupv1alpha1.ConditionTypeComplete, 10); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -395,15 +441,30 @@ func TestRollbackRequest_DryRun(t *testing.T) {
 		t.Fatal("expected Complete condition to be set")
 	}
 	if completeCond.Status != metav1.ConditionTrue {
-		t.Errorf("expected Complete=True for dry run, got %s", completeCond.Status)
+		t.Errorf("expected Complete=True for dry run, got %s (reason: %s, message: %s)",
+			completeCond.Status, completeCond.Reason, completeCond.Message)
 	}
 	if completeCond.Reason != "DryRunSucceeded" {
-		t.Errorf("expected reason DryRunSucceeded, got %s", completeCond.Reason)
+		t.Errorf("expected reason DryRunSucceeded, got %s (message: %s)", completeCond.Reason, completeCond.Message)
+	}
+
+	// Verify condition message includes version info and verification summary
+	if completeCond.Message == "" {
+		t.Error("expected non-empty condition message")
 	}
 
 	// Git should NOT have been committed for dry run
 	if len(mockGit.CommitFileCalls) != 0 {
 		t.Errorf("expected 0 commit calls for dry run, got %d", len(mockGit.CommitFileCalls))
+	}
+
+	// Kustomization should be resumed after dry run
+	var ks kustomizev1.Kustomization
+	if err := r.Get(ctx, types.NamespacedName{Name: "apps", Namespace: "flux-system"}, &ks); err != nil {
+		t.Fatalf("failed to get kustomization: %v", err)
+	}
+	if ks.Spec.Suspend {
+		t.Error("expected Kustomization to be resumed after dry run")
 	}
 }
 

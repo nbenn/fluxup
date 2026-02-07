@@ -20,8 +20,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -47,16 +49,21 @@ const DefaultFluxNamespace = "flux-system"
 // OperationFinalizer is used to prevent deletion of in-progress operations.
 const OperationFinalizer = "fluxup.dev/operation-protection"
 
+// reasonNotReady is a shared string used as a condition reason or status label.
+const reasonNotReady = "NotReady"
+
 // Phase timeout defaults (conservative values)
 const (
 	TimeoutSuspend       = 2 * time.Minute
 	TimeoutScaleDown     = 5 * time.Minute
+	TimeoutScaleUp       = 5 * time.Minute
 	TimeoutSnapshot      = 30 * time.Minute
 	TimeoutGitCommit     = 2 * time.Minute
 	TimeoutReconcile     = 10 * time.Minute
 	TimeoutHealthCheck   = 5 * time.Minute
 	TimeoutVolumeRestore = 30 * time.Minute
 	TimeoutGitRevert     = 2 * time.Minute
+	TimeoutResume        = 2 * time.Minute
 )
 
 // UpgradeRequestReconciler reconciles an UpgradeRequest
@@ -95,6 +102,175 @@ func (r *UpgradeRequestReconciler) isPhaseTimedOut(upgrade *fluxupv1alpha1.Upgra
 	return time.Since(upgrade.Status.PhaseStartedAt.Time) > timeout
 }
 
+// preflightResult holds the results of preflight checks, passed from preflight to dry-run.
+type preflightResult struct {
+	// Discovered workloads (from PVC-based discovery)
+	Workloads []discovery.WorkloadInfo
+	// Discovered PVCs
+	PVCs []discovery.PVCInfo
+	// Summary messages for the condition message
+	Summary []string
+	// Whether any warnings were produced
+	Warnings []string
+}
+
+// runUpgradePreflight runs read-only preflight checks for an upgrade operation.
+// It validates infrastructure prerequisites before any mutations.
+func (r *UpgradeRequestReconciler) runUpgradePreflight(ctx context.Context, app *fluxupv1alpha1.ManagedApp, snapshotsEnabled bool) (*preflightResult, error) {
+	logger := logging.FromContext(ctx)
+	result := &preflightResult{}
+
+	// --- Flux preflight ---
+
+	// Suspend target validation
+	ksRef := app.Spec.KustomizationRef
+	ksNS := ksRef.Namespace
+	if ksNS == "" {
+		ksNS = DefaultFluxNamespace
+	}
+
+	if err := r.FluxHelper.ValidateSuspendTarget(ctx,
+		&struct{ Name, Namespace string }{Name: ksRef.Name, Namespace: ksNS},
+		r.getSuspendRefStruct(app)); err != nil {
+		return nil, fmt.Errorf("invalid suspend target: %w", err)
+	}
+
+	// Kustomization health (warn only)
+	reconciled, err := r.FluxHelper.IsReconciled(ctx, ksRef.Name, ksNS)
+	if err != nil {
+		logger.Warn("preflight: could not check Kustomization health", "error", err)
+	} else if !reconciled {
+		msg := fmt.Sprintf("Kustomization %s/%s is not Ready — operation may fail at reconciliation", ksNS, ksRef.Name)
+		logger.Warn("preflight: " + msg)
+		result.Warnings = append(result.Warnings, msg)
+	}
+
+	// Kustomization already suspended (warn only)
+	suspendName, suspendNS := r.getSuspendTarget(app)
+	suspended, err := r.FluxHelper.IsSuspended(ctx, suspendName, suspendNS)
+	if err != nil {
+		logger.Warn("preflight: could not check Kustomization suspension state", "error", err)
+	} else if suspended {
+		msg := fmt.Sprintf("Kustomization %s/%s is already suspended — operation will resume it upon completion", suspendNS, suspendName)
+		logger.Warn("preflight: " + msg)
+		result.Warnings = append(result.Warnings, msg)
+	}
+
+	ksStatus := "Ready"
+	if !reconciled {
+		ksStatus = reasonNotReady
+	}
+
+	// --- Snapshot preflight (upgrade only, when enabled) ---
+	if snapshotsEnabled {
+		// PVC discovery
+		pvcs, err := r.Discoverer.DiscoverPVCs(ctx, app)
+		if err != nil {
+			return nil, fmt.Errorf("PVC discovery failed: %w", err)
+		}
+		result.PVCs = pvcs
+
+		if len(pvcs) == 0 {
+			logger.Info("preflight: no RWO PVCs discovered — snapshots will be skipped")
+		} else {
+			pvcNames := make([]string, len(pvcs))
+			for i, p := range pvcs {
+				pvcNames[i] = p.Name
+			}
+			logger.Info("preflight: discovered PVCs to snapshot", "count", len(pvcs), "pvcs", pvcNames)
+		}
+
+		// Workload discovery
+		workloads, err := r.Discoverer.DiscoverWorkloads(ctx, app)
+		if err != nil {
+			return nil, fmt.Errorf("workload discovery failed: %w", err)
+		}
+		result.Workloads = workloads
+
+		if len(workloads) == 0 {
+			logger.Info("preflight: no workloads discovered mounting PVCs")
+		} else {
+			wNames := make([]string, len(workloads))
+			for i, w := range workloads {
+				wNames[i] = w.Kind + "/" + w.Name
+			}
+			logger.Info("preflight: workloads to scale", "count", len(workloads), "workloads", wNames)
+		}
+
+		// VolumeSnapshotClass validation
+		if app.Spec.VolumeSnapshots != nil && app.Spec.VolumeSnapshots.VolumeSnapshotClassName != "" {
+			var vsc snapshotv1.VolumeSnapshotClass
+			if err := r.Get(ctx, types.NamespacedName{Name: app.Spec.VolumeSnapshots.VolumeSnapshotClassName}, &vsc); err != nil {
+				return nil, fmt.Errorf("VolumeSnapshotClass %q not found: %w", app.Spec.VolumeSnapshots.VolumeSnapshotClassName, err)
+			}
+		}
+
+		result.Summary = append(result.Summary, fmt.Sprintf("Kustomization %s/%s %s. %d PVCs to snapshot, %d workloads to scale",
+			ksNS, ksRef.Name, ksStatus, len(pvcs), len(workloads)))
+	} else {
+		result.Summary = append(result.Summary, fmt.Sprintf("Kustomization %s/%s %s. Snapshots disabled",
+			ksNS, ksRef.Name, ksStatus))
+	}
+
+	return result, nil
+}
+
+// runGitDiffPreview reads the current file and computes the version change without committing.
+// Returns the current version, target version, and version path for inclusion in status messages.
+func (r *UpgradeRequestReconciler) runGitDiffPreview(ctx context.Context, app *fluxupv1alpha1.ManagedApp, targetVersion *fluxupv1alpha1.VersionInfo) (currentVersion, newVersion, versionPath string, err error) {
+	logger := logging.FromContext(ctx)
+
+	// Determine version path
+	versionPath = yamlpkg.DefaultHelmReleaseVersionPath
+	if app.Spec.VersionPolicy != nil && app.Spec.VersionPolicy.VersionPath != "" {
+		versionPath = app.Spec.VersionPolicy.VersionPath
+	}
+
+	// Determine the new version string
+	if targetVersion.Chart != "" {
+		newVersion = targetVersion.Chart
+	} else if len(targetVersion.Images) > 0 {
+		newVersion = targetVersion.Images[0].Tag
+		if app.Spec.VersionPolicy == nil || app.Spec.VersionPolicy.VersionPath == "" {
+			return "", "", "", fmt.Errorf("VersionPath must be specified for image updates")
+		}
+	} else {
+		return "", "", "", fmt.Errorf("no chart version or images specified")
+	}
+
+	// Read current file from Git
+	content, err := r.GitManager.ReadFile(ctx, app.Spec.GitPath)
+	if err != nil {
+		return "", "", "", fmt.Errorf("cannot read Git file %s: %w", app.Spec.GitPath, err)
+	}
+
+	// Verify it's a HelmRelease if using the default path
+	if versionPath == yamlpkg.DefaultHelmReleaseVersionPath && (app.Spec.VersionPolicy == nil || app.Spec.VersionPolicy.VersionPath == "") {
+		if !yamlpkg.IsHelmRelease(content) {
+			return "", "", "", fmt.Errorf("VersionPath must be specified for non-HelmRelease resources")
+		}
+	}
+
+	// Read current version
+	currentVersion, err = r.YAMLEditor.GetVersion(content, versionPath)
+	if err != nil {
+		return "", "", "", fmt.Errorf("cannot read version at path %s: %w", versionPath, err)
+	}
+
+	// Verify update produces valid YAML
+	if _, err := r.YAMLEditor.UpdateVersion(content, versionPath, newVersion); err != nil {
+		return "", "", "", fmt.Errorf("version update would produce invalid YAML: %w", err)
+	}
+
+	logger.Info("version change preview",
+		"file", app.Spec.GitPath,
+		"path", versionPath,
+		"current", currentVersion,
+		"target", newVersion)
+
+	return currentVersion, newVersion, versionPath, nil
+}
+
 // +kubebuilder:rbac:groups=fluxup.dev,resources=upgraderequests,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=fluxup.dev,resources=upgraderequests/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=fluxup.dev,resources=upgraderequests/finalizers,verbs=update
@@ -103,6 +279,7 @@ func (r *UpgradeRequestReconciler) isPhaseTimedOut(upgrade *fluxupv1alpha1.Upgra
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch;patch;update
 // +kubebuilder:rbac:groups=helm.toolkit.fluxcd.io,resources=helmreleases,verbs=get;list;watch
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshotclasses,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
@@ -188,42 +365,282 @@ func (r *UpgradeRequestReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return r.handleCompleted(ctx, &upgrade)
 }
 
-// handleDryRun validates the upgrade without making any changes
+// handleDryRun validates the upgrade and exercises the suspend/scale cycle without committing.
 func (r *UpgradeRequestReconciler) handleDryRun(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("processing dry run")
 
-	// Fetch the ManagedApp
+	// --- Initial validation (existing) ---
+
 	app, err := r.getManagedApp(ctx, upgrade)
 	if err != nil {
 		return r.setFailed(ctx, upgrade, "ManagedAppNotFound", err.Error())
 	}
 
-	// Check for available update
 	if upgrade.Spec.TargetVersion == nil && app.Status.AvailableUpdate == nil {
 		return r.setFailed(ctx, upgrade, "NoUpdateAvailable", "No update available for this app")
 	}
 
-	// Determine target version
 	targetVersion := upgrade.Spec.TargetVersion
 	if targetVersion == nil {
 		targetVersion = app.Status.AvailableUpdate
 	}
 
-	// Validate Git path is readable
+	snapshotsEnabled := !upgrade.Spec.SkipSnapshot && app.Spec.VolumeSnapshots != nil && app.Spec.VolumeSnapshots.Enabled
+
+	// --- Git diff preview (NEW — all operations) ---
+
+	var currentVersion, newVersion, versionPath string
 	if r.GitManager != nil {
-		_, err := r.GitManager.ReadFile(ctx, app.Spec.GitPath)
+		currentVersion, newVersion, versionPath, err = r.runGitDiffPreview(ctx, app, targetVersion)
 		if err != nil {
-			return r.setFailed(ctx, upgrade, "GitReadFailed", fmt.Sprintf("Cannot read Git file: %v", err))
+			return r.setFailed(ctx, upgrade, "PreflightFailed", err.Error())
 		}
 	}
 
-	// Mark as complete (dry run successful)
+	// --- Preflight checks (NEW — all operations) ---
+
+	preflight, err := r.runUpgradePreflight(ctx, app, snapshotsEnabled)
+	if err != nil {
+		return r.setFailed(ctx, upgrade, "PreflightFailed", err.Error())
+	}
+
+	// --- Dry-run quiescence cycle (NEW — dry-run only) ---
+	// Exercise the full suspend → scale down → scale up → resume cycle.
+
+	return r.runDryRunQuiescence(ctx, upgrade, app, preflight, currentVersion, newVersion, versionPath)
+}
+
+// runDryRunQuiescence exercises the suspend/scale cycle for dry-run validation.
+// It uses conditions to track progress through the cycle, allowing the reconcile
+// loop to retry on transient failures.
+func (r *UpgradeRequestReconciler) runDryRunQuiescence(
+	ctx context.Context,
+	upgrade *fluxupv1alpha1.UpgradeRequest,
+	app *fluxupv1alpha1.ManagedApp,
+	preflight *preflightResult,
+	currentVersion, newVersion, versionPath string,
+) (ctrl.Result, error) {
+	suspendName, suspendNS := r.getSuspendTarget(app)
+
+	// Phase 1: Suspend Kustomization
+	if !meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeSuspended) {
+		return r.dryRunSuspend(ctx, upgrade, app, suspendName, suspendNS)
+	}
+
+	// Phase 2: Scale down workloads (if any discovered)
+	if len(preflight.Workloads) > 0 && !meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeWorkloadStopped) {
+		return r.dryRunScaleDown(ctx, upgrade, app, preflight.Workloads)
+	}
+
+	// Phase 3: Verify still suspended, then scale up
+	if len(preflight.Workloads) > 0 && !meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeSnapshotReady) {
+		return r.dryRunScaleUp(ctx, upgrade, app, preflight.Workloads, suspendName, suspendNS)
+	}
+
+	// Phase 4: Resume Kustomization and complete
+	return r.dryRunResumeAndComplete(ctx, upgrade, app, preflight, suspendName, suspendNS, currentVersion, newVersion, versionPath)
+}
+
+// dryRunSuspend handles Phase 1 of the dry-run quiescence cycle: suspending the Kustomization.
+func (r *UpgradeRequestReconciler) dryRunSuspend(
+	ctx context.Context,
+	upgrade *fluxupv1alpha1.UpgradeRequest,
+	app *fluxupv1alpha1.ManagedApp,
+	suspendName, suspendNS string,
+) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+	r.setPhaseStartIfNeeded(upgrade)
+
+	if err := r.FluxHelper.SuspendKustomization(ctx, suspendName, suspendNS); err != nil {
+		if r.isPhaseTimedOut(upgrade, TimeoutSuspend) {
+			return r.setDryRunFailed(ctx, upgrade, app, fmt.Sprintf("Suspend timed out: %v", err))
+		}
+		if err := r.Status().Update(ctx, upgrade); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	suspended, err := r.FluxHelper.IsSuspended(ctx, suspendName, suspendNS)
+	if err != nil || !suspended {
+		if r.isPhaseTimedOut(upgrade, TimeoutSuspend) {
+			return r.setDryRunFailed(ctx, upgrade, app, "Suspend verification timed out")
+		}
+		if err := r.Status().Update(ctx, upgrade); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	r.resetPhaseStart(upgrade)
+	logger.Info("dry run: Kustomization suspended")
+
+	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
+		Type:               fluxupv1alpha1.ConditionTypeSuspended,
+		Status:             metav1.ConditionTrue,
+		Reason:             "DryRunSuspended",
+		Message:            fmt.Sprintf("Dry run: suspended %s/%s", suspendNS, suspendName),
+		ObservedGeneration: upgrade.Generation,
+	})
+
+	if err := r.Status().Update(ctx, upgrade); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// dryRunScaleDown handles Phase 2: scaling down workloads with RWO PVCs.
+func (r *UpgradeRequestReconciler) dryRunScaleDown(
+	ctx context.Context,
+	upgrade *fluxupv1alpha1.UpgradeRequest,
+	app *fluxupv1alpha1.ManagedApp,
+	workloads []discovery.WorkloadInfo,
+) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+	r.setPhaseStartIfNeeded(upgrade)
+
+	for _, w := range workloads {
+		ns := workloadNS(w, app.Namespace)
+		if _, err := r.WorkloadScaler.ScaleDown(ctx, w.Kind, w.Name, ns); err != nil {
+			return r.setDryRunFailed(ctx, upgrade, app, fmt.Sprintf("Scale down failed for %s/%s: %v", w.Kind, w.Name, err))
+		}
+	}
+
+	allDown, err := r.allWorkloadsScaledDown(ctx, workloads, app.Namespace)
+	if err != nil {
+		return r.setDryRunFailed(ctx, upgrade, app, fmt.Sprintf("Scale down check failed: %v", err))
+	}
+	if !allDown {
+		if r.isPhaseTimedOut(upgrade, TimeoutScaleDown) {
+			return r.setDryRunFailed(ctx, upgrade, app, "Scale down timed out")
+		}
+		if err := r.Status().Update(ctx, upgrade); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	r.resetPhaseStart(upgrade)
+	logger.Info("dry run: workloads scaled down", "count", len(workloads))
+
+	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
+		Type:               fluxupv1alpha1.ConditionTypeWorkloadStopped,
+		Status:             metav1.ConditionTrue,
+		Reason:             "DryRunScaledDown",
+		Message:            fmt.Sprintf("Dry run: scaled down %d workloads", len(workloads)),
+		ObservedGeneration: upgrade.Generation,
+	})
+
+	if err := r.Status().Update(ctx, upgrade); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// dryRunScaleUp handles Phase 3: verifying suspension, scaling up, and re-verifying.
+func (r *UpgradeRequestReconciler) dryRunScaleUp(
+	ctx context.Context,
+	upgrade *fluxupv1alpha1.UpgradeRequest,
+	app *fluxupv1alpha1.ManagedApp,
+	workloads []discovery.WorkloadInfo,
+	suspendName, suspendNS string,
+) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+
+	if err := r.FluxHelper.VerifyStillSuspended(ctx, suspendName, suspendNS); err != nil {
+		return r.setDryRunFailed(ctx, upgrade, app, fmt.Sprintf("External interference detected before scale-up: %v", err))
+	}
+
+	r.setPhaseStartIfNeeded(upgrade)
+
+	for _, w := range workloads {
+		ns := workloadNS(w, app.Namespace)
+		if err := r.WorkloadScaler.ScaleUp(ctx, w.Kind, w.Name, ns, 1); err != nil {
+			return r.setDryRunFailed(ctx, upgrade, app, fmt.Sprintf("Scale up failed for %s/%s: %v", w.Kind, w.Name, err))
+		}
+	}
+
+	allDown, err := r.allWorkloadsScaledDown(ctx, workloads, app.Namespace)
+	if err != nil {
+		return r.setDryRunFailed(ctx, upgrade, app, fmt.Sprintf("Scale up check failed: %v", err))
+	}
+	if allDown {
+		// Not all scaled up yet
+		if r.isPhaseTimedOut(upgrade, TimeoutScaleUp) {
+			return r.setDryRunFailed(ctx, upgrade, app, "Scale up timed out")
+		}
+		if err := r.Status().Update(ctx, upgrade); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	r.resetPhaseStart(upgrade)
+	logger.Info("dry run: workloads scaled back up", "count", len(workloads))
+
+	if err := r.FluxHelper.VerifyStillSuspended(ctx, suspendName, suspendNS); err != nil {
+		return r.setDryRunFailed(ctx, upgrade, app, fmt.Sprintf("External interference detected after scale-up: %v", err))
+	}
+
+	// Reuse SnapshotReady to signal scale-up complete in dry-run
+	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
+		Type:               fluxupv1alpha1.ConditionTypeSnapshotReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             "DryRunScaledUp",
+		Message:            fmt.Sprintf("Dry run: scaled up %d workloads", len(workloads)),
+		ObservedGeneration: upgrade.Generation,
+	})
+
+	if err := r.Status().Update(ctx, upgrade); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// dryRunResumeAndComplete handles Phase 4: resuming the Kustomization and building the summary.
+func (r *UpgradeRequestReconciler) dryRunResumeAndComplete(
+	ctx context.Context,
+	upgrade *fluxupv1alpha1.UpgradeRequest,
+	app *fluxupv1alpha1.ManagedApp,
+	preflight *preflightResult,
+	suspendName, suspendNS string,
+	currentVersion, newVersion, versionPath string,
+) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+	r.setPhaseStartIfNeeded(upgrade)
+
+	if err := r.FluxHelper.ResumeKustomization(ctx, suspendName, suspendNS); err != nil {
+		if r.isPhaseTimedOut(upgrade, TimeoutResume) {
+			return r.setDryRunFailed(ctx, upgrade, app, fmt.Sprintf("Resume timed out: %v", err))
+		}
+		if err := r.Status().Update(ctx, upgrade); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	suspended, err := r.FluxHelper.IsSuspended(ctx, suspendName, suspendNS)
+	if err != nil || suspended {
+		if r.isPhaseTimedOut(upgrade, TimeoutResume) {
+			return r.setDryRunFailed(ctx, upgrade, app, "Resume verification timed out")
+		}
+		if err := r.Status().Update(ctx, upgrade); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	r.resetPhaseStart(upgrade)
+	logger.Info("dry run: Kustomization resumed")
+
+	message := buildDryRunSummary("upgrade", preflight, currentVersion, newVersion, versionPath, app.Spec.GitPath)
+
 	meta.SetStatusCondition(&upgrade.Status.Conditions, metav1.Condition{
 		Type:               fluxupv1alpha1.ConditionTypeComplete,
 		Status:             metav1.ConditionTrue,
 		Reason:             "DryRunSucceeded",
-		Message:            fmt.Sprintf("Dry run validation passed. Would upgrade to %s", targetVersion.Chart),
+		Message:            message,
 		ObservedGeneration: upgrade.Generation,
 	})
 
@@ -231,7 +648,7 @@ func (r *UpgradeRequestReconciler) handleDryRun(ctx context.Context, upgrade *fl
 		return ctrl.Result{}, err
 	}
 
-	// Remove finalizer for dry run
+	// Remove finalizer
 	if controllerutil.ContainsFinalizer(upgrade, OperationFinalizer) {
 		controllerutil.RemoveFinalizer(upgrade, OperationFinalizer)
 		if err := r.Update(ctx, upgrade); err != nil {
@@ -242,7 +659,73 @@ func (r *UpgradeRequestReconciler) handleDryRun(ctx context.Context, upgrade *fl
 	return ctrl.Result{}, nil
 }
 
-// handleSuspend validates the request and suspends Flux
+// allWorkloadsScaledDown checks if all workloads in the list are scaled to zero.
+func (r *UpgradeRequestReconciler) allWorkloadsScaledDown(ctx context.Context, workloads []discovery.WorkloadInfo, defaultNS string) (bool, error) {
+	for _, w := range workloads {
+		ns := workloadNS(w, defaultNS)
+		down, err := r.WorkloadScaler.IsScaledDown(ctx, w.Kind, w.Name, ns)
+		if err != nil {
+			return false, err
+		}
+		if !down {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// workloadNS returns the workload's namespace, falling back to defaultNS if empty.
+func workloadNS(w discovery.WorkloadInfo, defaultNS string) string {
+	if w.Namespace != "" {
+		return w.Namespace
+	}
+	return defaultNS
+}
+
+// buildDryRunSummary creates the condition message for a successful dry-run.
+func buildDryRunSummary(operation string, preflight *preflightResult, currentVersion, newVersion, versionPath, gitPath string) string {
+	var msgParts []string
+	if versionPath != "" {
+		msgParts = append(msgParts, fmt.Sprintf("Would %s from %s to %s (%s in %s)", operation, currentVersion, newVersion, versionPath, gitPath))
+	}
+	if len(preflight.Summary) > 0 {
+		msgParts = append(msgParts, "Preflight: "+strings.Join(preflight.Summary, "; "))
+	}
+
+	var verified []string
+	verified = append(verified, "suspend/resume: verified")
+	if len(preflight.Workloads) > 0 {
+		wNames := make([]string, len(preflight.Workloads))
+		for i, w := range preflight.Workloads {
+			wNames[i] = w.Kind + "/" + w.Name
+		}
+		verified = append(verified, fmt.Sprintf("scale down/up: verified (%s)", strings.Join(wNames, ", ")))
+	}
+	msgParts = append(msgParts, strings.Join(verified, ". ")+".")
+
+	return "Dry run passed. " + strings.Join(msgParts, " ")
+}
+
+// setDryRunFailed marks the dry-run as failed. Before failing, it attempts to
+// resume the Kustomization if it was suspended during the dry-run.
+func (r *UpgradeRequestReconciler) setDryRunFailed(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest, app *fluxupv1alpha1.ManagedApp, message string) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+
+	// Attempt to resume Kustomization if we suspended it
+	if meta.IsStatusConditionTrue(upgrade.Status.Conditions, fluxupv1alpha1.ConditionTypeSuspended) {
+		suspendName, suspendNS := r.getSuspendTarget(app)
+		if resumeErr := r.FluxHelper.ResumeKustomization(ctx, suspendName, suspendNS); resumeErr != nil {
+			logger.Error("dry run: failed to resume Kustomization during cleanup", "error", resumeErr)
+			message = fmt.Sprintf("%s (WARNING: Kustomization may still be suspended — manual resume required)", message)
+		} else {
+			logger.Info("dry run: resumed Kustomization during cleanup")
+		}
+	}
+
+	return r.setFailed(ctx, upgrade, "DryRunFailed", message)
+}
+
+// handleSuspend validates the request, runs preflight checks, and suspends Flux
 func (r *UpgradeRequestReconciler) handleSuspend(ctx context.Context, upgrade *fluxupv1alpha1.UpgradeRequest) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
@@ -263,6 +746,19 @@ func (r *UpgradeRequestReconciler) handleSuspend(ctx context.Context, upgrade *f
 		targetVersion = app.Status.AvailableUpdate
 	}
 
+	// --- Git diff preview (runs for all operations) ---
+	if r.GitManager != nil {
+		if _, _, _, err := r.runGitDiffPreview(ctx, app, targetVersion); err != nil {
+			return r.setFailed(ctx, upgrade, "PreflightFailed", err.Error())
+		}
+	}
+
+	// --- Preflight checks (runs for all operations) ---
+	snapshotsEnabled := !upgrade.Spec.SkipSnapshot && app.Spec.VolumeSnapshots != nil && app.Spec.VolumeSnapshots.Enabled
+	if _, err := r.runUpgradePreflight(ctx, app, snapshotsEnabled); err != nil {
+		return r.setFailed(ctx, upgrade, "PreflightFailed", err.Error())
+	}
+
 	logger.Info("starting upgrade",
 		"app", app.Name,
 		"currentVersion", app.Status.CurrentVersion,
@@ -270,19 +766,6 @@ func (r *UpgradeRequestReconciler) handleSuspend(ctx context.Context, upgrade *f
 
 	// Determine which Kustomization to suspend (suspendRef or kustomizationRef)
 	suspendName, suspendNS := r.getSuspendTarget(app)
-
-	// Validate suspend target is appropriate (root if no explicit suspendRef)
-	ksRef := app.Spec.KustomizationRef
-	ksNS := ksRef.Namespace
-	if ksNS == "" {
-		ksNS = DefaultFluxNamespace
-	}
-
-	if err := r.FluxHelper.ValidateSuspendTarget(ctx,
-		&struct{ Name, Namespace string }{Name: ksRef.Name, Namespace: ksNS},
-		r.getSuspendRefStruct(app)); err != nil {
-		return r.setFailed(ctx, upgrade, "InvalidSuspendTarget", err.Error())
-	}
 
 	// Suspend Flux Kustomization
 	if err := r.FluxHelper.SuspendKustomization(ctx, suspendName, suspendNS); err != nil {

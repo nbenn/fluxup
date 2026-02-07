@@ -396,18 +396,9 @@ spec:
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Log full status for debugging
-			cmd = exec.Command("kubectl", "get", "upgraderequest", "external-unsuspend-test",
-				"-n", failureTestNS, "-o", "yaml")
-			fullOutput, _ := utils.Run(cmd)
-			GinkgoWriter.Printf("UpgradeRequest status:\n%s\n", fullOutput)
-
 			// The failure could be detected at suspend verification or the upgrade might succeed
 			// if it was fast enough - both outcomes are valid for this test
-			cmd = exec.Command("kubectl", "get", "upgraderequest", "external-unsuspend-test",
-				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
-			reason, _ := utils.Run(cmd)
-			GinkgoWriter.Printf("Complete reason: %s, message: %s\n", reason, output)
+			_ = output
 		})
 	})
 
@@ -829,12 +820,6 @@ spec:
 				g.Expect(output).NotTo(BeEmpty())
 			}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
-			By("checking final status")
-			cmd = exec.Command("kubectl", "get", "upgraderequest", "timeout-test",
-				"-n", failureTestNS, "-o", "yaml")
-			fullOutput, _ := utils.Run(cmd)
-			GinkgoWriter.Printf("UpgradeRequest final status:\n%s\n", fullOutput)
-
 			By("verifying Kustomization is resumed after completion")
 			// The controller should resume the Kustomization after the upgrade completes
 			// Give it a moment to reconcile
@@ -907,9 +892,8 @@ spec:
 			By("checking the upgrade status")
 			cmd = exec.Command("kubectl", "get", "upgraderequest", "delete-managedapp-test",
 				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
-			output, err := utils.Run(cmd)
+			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			GinkgoWriter.Printf("Upgrade completion reason: %s\n", output)
 		})
 
 		It("should handle Kustomization deletion during rollback", func() {
@@ -991,9 +975,8 @@ spec:
 			By("checking the rollback status")
 			cmd = exec.Command("kubectl", "get", "rollbackrequest", "rollback-kustomization-delete",
 				"-n", failureTestNS, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
-			output, err := utils.Run(cmd)
+			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			GinkgoWriter.Printf("Rollback completion reason: %s\n", output)
 		})
 	})
 
@@ -1051,11 +1034,8 @@ spec:
 			By("verifying finalizer status")
 			cmd = exec.Command("kubectl", "get", "upgraderequest", "finalizer-test",
 				"-n", failureTestNS, "-o", "jsonpath={.metadata.finalizers}")
-			output, err := utils.Run(cmd)
+			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			// Finalizer may still be present on completed requests (removed on deletion)
-			// Just verify we can read the finalizers field
-			GinkgoWriter.Printf("Finalizers: %s\n", output)
 		})
 
 		It("should be deletable after completion", func() {
@@ -1314,12 +1294,6 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).NotTo(BeEmpty())
 			}, 3*time.Minute, 5*time.Second).Should(Succeed())
-
-			By("checking final status")
-			cmd = exec.Command("kubectl", "get", "upgraderequest", "redis-raw-timeout-test",
-				"-n", failureTestNS, "-o", "yaml")
-			fullOutput, _ := utils.Run(cmd)
-			GinkgoWriter.Printf("UpgradeRequest final status:\n%s\n", fullOutput)
 
 			By("verifying Kustomization is resumed after completion")
 			Eventually(func(g Gomega) {

@@ -404,25 +404,7 @@ spec:
 
 				By("waiting for upgrade to complete")
 				Eventually(func(g Gomega) {
-					// Log all conditions to see current state
 					cmd := exec.Command("kubectl", "get", "upgraderequest", redisRawAppName+"-upgrade",
-						"-n", ksTestNamespace, "-o", "jsonpath={.status.conditions}")
-					conditions, _ := utils.Run(cmd)
-					GinkgoWriter.Printf("Current conditions: %s\n", conditions)
-
-					// Log controller logs for context
-					cmd = exec.Command("kubectl", "logs", "-l", "control-plane=controller-manager",
-						"-n", namespace, "--tail=20")
-					logs, _ := utils.Run(cmd)
-					GinkgoWriter.Printf("Recent controller logs:\n%s\n", logs)
-
-					// Log Kustomization state
-					cmd = exec.Command("kubectl", "get", "kustomization", ksKustomizationName,
-						"-n", fluxSystemNS, "-o", "jsonpath={.spec.suspend},{.status.conditions[?(@.type=='Ready')].status},{.status.conditions[?(@.type=='Ready')].reason}")
-					ksState, _ := utils.Run(cmd)
-					GinkgoWriter.Printf("Kustomization state (suspend,ready,reason): %s\n", ksState)
-
-					cmd = exec.Command("kubectl", "get", "upgraderequest", redisRawAppName+"-upgrade",
 						"-n", ksTestNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].status}")
 					output, err := utils.Run(cmd)
 					g.Expect(err).NotTo(HaveOccurred())
@@ -434,12 +416,6 @@ spec:
 					"-n", ksTestNamespace, "-o", "jsonpath={.status.conditions[?(@.type=='Complete')].reason}")
 				output, err := utils.Run(cmd)
 				Expect(err).NotTo(HaveOccurred())
-
-				// Log full status for debugging
-				cmd = exec.Command("kubectl", "get", "upgraderequest", redisRawAppName+"-upgrade",
-					"-n", ksTestNamespace, "-o", "yaml")
-				fullOutput, _ := utils.Run(cmd)
-				GinkgoWriter.Printf("UpgradeRequest status:\n%s\n", fullOutput)
 
 				if output == "UpgradeSucceeded" {
 					By("verifying Git commit was made")

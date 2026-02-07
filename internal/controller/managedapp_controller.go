@@ -94,7 +94,7 @@ func (r *ManagedAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// 3. Update Ready condition based on health check result
 	status := metav1.ConditionFalse
-	reason := "NotReady"
+	reason := reasonNotReady
 
 	if result.Healthy {
 		status = metav1.ConditionTrue

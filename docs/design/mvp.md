@@ -683,3 +683,357 @@ Context("Kustomization-based failure scenarios", func() {
 - Validation of automatic rollback trigger and execution
 
 This scenario should be implemented once more sophisticated test fixtures are available.
+
+---
+
+## Enhanced Dry-Run and Preflight Checks
+
+### Problem
+
+The current dry-run implementation is shallow. For upgrades, it checks that the ManagedApp exists, an update is available, and the Git file is readable. For rollbacks, it checks that the UpgradeRequest exists, is terminal, has snapshots, and has a previous version recorded. Neither goes deeper into the operation pipeline.
+
+This means operations — dry-run *or real* — can't catch issues early like:
+- The version change would produce invalid YAML
+- The Flux Kustomization doesn't exist or isn't healthy
+- The VolumeSnapshotClass doesn't exist
+- No workloads mount the PVCs (nothing to scale down)
+- Rollback snapshots have been garbage-collected since the upgrade
+
+Users also get no visibility into *what* the operation would actually do — there's no preview of the Git change. And the dry-run doesn't exercise the most critical (and least trusted) part of the pipeline: the suspend → scale-down → scale-up → resume cycle.
+
+### Goals
+
+1. **Preflight checks for all operations** — validate infrastructure prerequisites before any mutations, whether dry-run or real
+2. **Git diff preview** — show what the version change would look like before committing
+3. **Active verification in dry-run** — exercise the full suspend and scale-down/up cycle, confirming the quiescence path works end-to-end
+
+### Design Principles
+
+- **Preflight runs always** — read-only cluster validation happens before branching into dry-run vs real. A real upgrade that would fail because the VolumeSnapshotClass doesn't exist should fail fast with a clear `PreflightFailed` reason, not halfway through the pipeline with a cryptic CSI error.
+- **Dry-run exercises mutations** — the suspend → scale-down → scale-up → resume cycle is real state mutation. This is intentional. Discovering a suspend/resume or scaling problem during a dry-run means you fix it and retry. Discovering it mid-snapshot-restore means you're in an incident. Dry-runs should therefore be performed during maintenance windows.
+- **No new API fields** — diff, preflight, and verification results go to controller log output and the condition message summary.
+- **Reuse existing helpers** — all required functionality already exists in the codebase.
+
+---
+
+### Enhancement 1: Infrastructure Preflight Checks (All Operations)
+
+Preflight checks run for **every** operation — dry-run and real. They are read-only cluster queries that validate the prerequisites for each pipeline phase. They execute after initial validation (ManagedApp exists, update available, etc.) but before any mutations.
+
+#### Flux Preflight (both upgrade and rollback)
+
+**Suspend target validation** — via `FluxHelper.ValidateSuspendTarget()`:
+
+Checks two things:
+1. The Kustomization referenced by `kustomizationRef` (or `suspendRef`) actually exists on the cluster
+2. If no explicit `suspendRef` is set, the `kustomizationRef` Kustomization is a "root" — not managed by a parent Kustomization via ownerReferences or Flux labels
+
+The second check matters because suspending a child Kustomization is unsafe — the parent can un-suspend it during the operation. Today this check only runs at the start of `handleSuspend()`; moving it into preflight catches misconfigured `suspendRef` / app-of-apps patterns before any state is touched.
+
+Failure mode: fail with reason `PreflightFailed` (or `InvalidSuspendTarget`).
+
+**Kustomization health** — via `FluxHelper.IsReconciled()`:
+
+Check whether the Kustomization has `Ready=True`. Upgrading or rolling back an app whose Kustomization is already in a failed state is risky — the reconciliation phase will likely time out regardless of the version change.
+
+Failure mode: warn in log. This is a warning rather than a hard failure because there are legitimate reasons to proceed (e.g., the upgrade itself fixes the issue). The log message should make it clear: `"WARNING: Kustomization flux-system/gitea-ks is not Ready — operation may fail at reconciliation"`.
+
+**Kustomization currently suspended** — via `FluxHelper.IsSuspended()`:
+
+If the Kustomization is already suspended (e.g., someone manually suspended it, or a previous failed operation left it suspended), the real operation's `SuspendKustomization()` call will succeed silently (it's a no-op when already suspended). But resuming after the operation may have unintended consequences if the suspension was intentional.
+
+Failure mode: warn in log. `"WARNING: Kustomization flux-system/gitea-ks is already suspended — operation will resume it upon completion"`.
+
+#### Snapshot Preflight (upgrade only, when snapshots enabled)
+
+Only runs when `!skipSnapshot && volumeSnapshots.enabled`. Validates that snapshot infrastructure will work when the real operation reaches `handleSnapshotting()`.
+
+**PVC discovery** — via `Discoverer.DiscoverPVCs()`:
+
+Runs the same discovery logic the real operation uses: explicit PVC list from config, or auto-discovery from HelmRelease / Kustomization inventory, filtered to RWO only and with exclusions applied.
+
+This catches:
+- HelmRelease doesn't exist or has no release secret (Helm discovery fails)
+- Kustomization has no inventory entries (Kustomization discovery fails)
+- No RWO PVCs exist (nothing to snapshot — not an error, but informative)
+- Explicitly configured PVCs don't exist on the cluster
+
+Failure mode: discovery errors fail with reason `PreflightFailed`. "No PVCs found" is logged as info.
+
+Log output: `"preflight: discovered N PVCs to snapshot: [data-redis-0, data-postgres-0]"` or `"preflight: no RWO PVCs discovered — snapshots will be skipped"`.
+
+**Workload discovery** — via `Discoverer.DiscoverWorkloads()`:
+
+Discovers Deployments/StatefulSets that mount the discovered PVCs. In the real operation, these workloads are scaled to zero before snapshotting to ensure crash-consistent snapshots.
+
+This catches:
+- Pods mounting PVCs aren't owned by a Deployment or StatefulSet (can't be scaled)
+- Workloads are in a different namespace than expected
+
+Failure mode: discovery errors fail with reason `PreflightFailed`. "No workloads found" is logged as info (the PVC might be unmounted, which is fine for snapshotting).
+
+Log output: `"preflight: N workloads to scale: [StatefulSet/redis, Deployment/worker]"`.
+
+**VolumeSnapshotClass validation** — via `client.Get()` on VolumeSnapshotClass:
+
+If `volumeSnapshots.volumeSnapshotClassName` is configured in the ManagedApp, verify the VolumeSnapshotClass exists on the cluster. This is a new check — the real operation currently fails at `SnapshotManager.CreateSnapshot()` time when the CSI driver rejects the snapshot request with a non-existent class.
+
+If no class is configured, skip this check (the CSI driver uses its default class).
+
+Failure mode: fail with reason `PreflightFailed` (`VolumeSnapshotClassNotFound`).
+
+#### Snapshot Restore Preflight (rollback only, when snapshots present)
+
+Only runs when the referenced UpgradeRequest has snapshots in `status.snapshot.pvcSnapshots`. Validates that the restore path in `handleVolumeRestore()` will work.
+
+**Snapshot existence and readiness** — via `SnapshotManager.IsSnapshotReady()` per snapshot:
+
+The current rollback dry-run checks that the *list* of snapshots is non-empty in the UpgradeRequest status. But it doesn't verify the actual VolumeSnapshot objects still exist on the cluster. Between the upgrade and the rollback:
+- Snapshots may have been garbage-collected by retention policy
+- Snapshots may have been manually deleted
+- The VolumeSnapshot CRD's `deletionPolicy` may have removed the underlying storage
+
+For each snapshot in `upgrade.Status.Snapshot.PVCSnapshots`, call `IsSnapshotReady()` to verify the VolumeSnapshot object exists and has `readyToUse=true`.
+
+Failure mode: fail with reason `PreflightFailed` (`SnapshotNotReady`) — `"snapshot gitea-data-pre-upgrade-20260205-120000 no longer exists or is not ready"`.
+
+**Workload discovery for PVCs** — via `Discoverer.DiscoverWorkloadsForPVCs()`:
+
+The rollback `handleStopWorkload()` discovers workloads that mount the PVCs being restored. This is necessary because PVCs can't be deleted while mounted. Preflight verifies this discovery works and reports what would be scaled down.
+
+Failure mode: discovery errors fail with reason `PreflightFailed`. "No workloads found" is logged as info.
+
+Log output: `"preflight: N workloads to scale down before PVC restore: [StatefulSet/redis]"`.
+
+#### Preflight Summary
+
+| Check | Upgrade | Rollback | Failure mode |
+|-------|:-------:|:--------:|-------------|
+| Suspend target valid | Yes | Yes | Fail |
+| Kustomization healthy | Yes | Yes | Warn |
+| Kustomization already suspended | Yes | Yes | Warn |
+| PVC discovery | If snapshots enabled | — | Fail on error, info if empty |
+| Workload discovery | If snapshots enabled | If snapshots present | Fail on error, info if empty |
+| VolumeSnapshotClass exists | If class configured | — | Fail |
+| Snapshots still exist/ready | — | If snapshots present | Fail |
+
+---
+
+### Enhancement 2: Git Diff Preview (All Operations)
+
+#### Current behavior
+
+UpgradeRequest dry-run calls `GitManager.ReadFile()` to verify the path is readable. That's it — the file content is discarded.
+
+RollbackRequest dry-run doesn't touch Git at all.
+
+The real operations only read the file at commit/revert time, after suspension and scaling are already done.
+
+#### New behavior
+
+Both upgrade and rollback — dry-run and real — will compute and log the version diff **before** any mutations. This runs after preflight, alongside the existing initial validation.
+
+Steps:
+
+1. Read the current file content via `GitManager.ReadFile()`
+2. Read the current version via `YAMLEditor.GetVersion()`
+3. Compute the new content via `YAMLEditor.UpdateVersion()`
+4. Log the version change at Info level
+
+For upgrades, the version path and new version are determined the same way as in `handleCommitting()`. For rollbacks, they follow the same logic as `handleGitRevert()`.
+
+This catches issues early — before any suspension or scaling:
+- Version path doesn't exist in the YAML (bad `versionPath` config)
+- YAML parsing failures
+- Non-HelmRelease files using the default HelmRelease version path
+
+#### Example log output
+
+```
+INFO  version change preview
+      file=flux/apps/gitea/helmrelease.yaml
+      path=spec.chart.spec.version
+      current=1.0.0
+      target=2.0.0
+```
+
+---
+
+### Enhancement 3: Active Verification in Dry-Run
+
+This is the key difference between dry-run and real operations. After preflight and Git diff (which both paths share), the dry-run exercises the full quiescence cycle: suspend → scale down → verify → scale up → verify → resume → verify.
+
+This is a **real mutation** of cluster state. The app goes offline briefly. This is intentional — the quiescence path is the most critical and least trusted part of the pipeline. Discovering problems here during a dry-run (maintenance window, nothing else at stake) is far preferable to discovering them mid-snapshot-restore.
+
+#### Dry-run quiescence cycle
+
+1. **Suspend Kustomization** — via `FluxHelper.SuspendKustomization()`
+2. **Verify suspended** — via `FluxHelper.IsSuspended()`, confirm `spec.suspend=true`
+3. **Scale down workloads** — via `WorkloadScaler.ScaleDown()` using workloads discovered during preflight
+4. **Verify scaled down** — via `WorkloadScaler.WaitForScaleDown()`, confirm all pods terminated
+5. **Verify still suspended** — via `FluxHelper.VerifyStillSuspended()`, catch external interference before scale-up
+6. **Scale up workloads** — via `WorkloadScaler.ScaleUp()`, restore original replica counts
+7. **Verify scaled up** — via `WorkloadScaler.WaitForScaleUp()`, confirm pods running
+8. **Verify still suspended** — via `FluxHelper.VerifyStillSuspended()`, confirm no interference before resuming
+9. **Resume Kustomization** — via `FluxHelper.ResumeKustomization()`
+10. **Verify resumed** — via `FluxHelper.IsSuspended()`, confirm `spec.suspend=false`
+
+#### Error handling
+
+The dry-run **must not** exit `DryRunSucceeded` until the Kustomization is confirmed resumed and workloads are confirmed scaled back up. The existing finalizer provides a safety net — if the controller crashes between suspend and resume, the finalizer's cleanup logic will resume the Kustomization on deletion.
+
+If resume fails, the dry-run retries within the reconcile loop (same pattern as the real operation). The dry-run only fails with `DryRunFailed` after the 2-minute timeout for the resume phase is exhausted.
+
+If scale-up fails after a successful scale-down, the dry-run continues retrying scale-up. It does not attempt to resume the Kustomization until workloads are confirmed up — resuming while scaled to zero could cause Flux to see the app as degraded and take corrective action.
+
+If `VerifyStillSuspended` fails (external interference un-suspended the Kustomization), the dry-run fails with reason `DryRunFailed` and message indicating external interference was detected. At this point the workloads may already be scaling back up via Flux reconciliation, so the dry-run should not attempt to re-suspend or further mutate state — it reports the failure and exits. This mirrors the real operation's behavior when `VerifyStillSuspended` fails before Git commit or PVC deletion.
+
+#### Timeouts
+
+The dry-run reuses the existing per-phase timeout infrastructure (`setPhaseStartIfNeeded`, `isPhaseTimedOut`):
+
+| Dry-run phase | Timeout | Notes |
+|---------------|---------|-------|
+| Suspend | 2 min | Same as real operation |
+| Scale down | 5 min | Same as real operation |
+| Scale up | 5 min | Same as real operation |
+| Resume | 2 min | Same as real operation |
+
+#### Passing preflight data to dry-run
+
+The preflight phase discovers PVCs and workloads. These results are passed to the dry-run quiescence cycle rather than re-discovering. This avoids duplicate work and ensures consistency — the workloads that were validated in preflight are exactly the workloads that get scaled.
+
+Implementation: preflight stores discovered workloads in a local variable within the reconcile handler, which is passed to the dry-run branch. No status field needed.
+
+---
+
+### Condition Messages
+
+The dry-run condition message distinguishes between the phases:
+
+```
+Dry run passed. Would upgrade gitea from 1.0.0 to 2.0.0 (spec.chart.spec.version in flux/apps/gitea/helmrelease.yaml).
+Preflight: Kustomization flux-system/gitea-ks Ready. 2 PVCs to snapshot, 2 workloads to scale.
+Suspend/resume: verified. Scale down/up: verified (StatefulSet/redis, Deployment/worker).
+```
+
+For real operations, preflight results are logged but not included in the condition message (the condition reflects the current phase, not preflight).
+
+---
+
+### Implementation
+
+#### Files to modify
+
+| File | Change |
+|------|--------|
+| `internal/controller/upgraderequest_controller.go` | Extract preflight into shared path, extend `handleDryRun()` with Git diff + quiescence cycle |
+| `internal/controller/rollbackrequest_controller.go` | Extract preflight into shared path, extend `handleDryRun()` with Git diff + quiescence cycle |
+| `internal/controller/upgraderequest_unit_test.go` | Add preflight tests (shared path) + dry-run quiescence tests |
+| `internal/controller/rollbackrequest_unit_test.go` | Add preflight tests (shared path) + dry-run quiescence tests |
+
+#### RBAC
+
+New marker needed for VolumeSnapshotClass read access:
+
+```go
+// +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshotclasses,verbs=get;list
+```
+
+#### Existing helpers reused
+
+All required functionality already exists — no new packages or interfaces:
+
+- `YAMLEditor.UpdateVersion()` / `GetVersion()` — `internal/yaml/editor.go`
+- `GitManager.ReadFile()` — `internal/git/interface.go`
+- `FluxHelper.ValidateSuspendTarget()` / `IsReconciled()` / `IsSuspended()` / `SuspendKustomization()` / `ResumeKustomization()` — `internal/flux/suspend.go`
+- `Discoverer.DiscoverPVCs()` / `DiscoverWorkloads()` / `DiscoverWorkloadsForPVCs()` — `internal/discovery/discovery.go`
+- `SnapshotManager.IsSnapshotReady()` — `internal/snapshot/manager.go`
+- `WorkloadScaler.ScaleDown()` / `ScaleUp()` / `WaitForScaleDown()` / `WaitForScaleUp()` — `internal/workload/scaler.go`
+
+#### Upgrade flow (revised)
+
+```
+ 1. Fetch ManagedApp                          (existing)
+ 2. Check update available                    (existing)
+ 3. Determine target version                  (existing)
+ 4. Git diff preview                          (NEW — all operations)
+    a. Read file via GitManager.ReadFile()
+    b. Read current version via YAMLEditor.GetVersion()
+    c. Compute new content via YAMLEditor.UpdateVersion()
+    d. Log version change
+ 5. Preflight checks                          (NEW — all operations)
+    a. ValidateSuspendTarget()
+    b. IsReconciled() — warn if not Ready
+    c. IsSuspended() — warn if already suspended
+    d. If snapshots enabled:
+       - DiscoverPVCs()
+       - DiscoverWorkloads()
+       - Verify VolumeSnapshotClass exists (if configured)
+ 6. Branch:
+    DRY-RUN:
+      a. Suspend Kustomization
+      b. Verify suspended
+      c. Scale down discovered workloads
+      d. Verify scaled down (WaitForScaleDown)
+      e. Verify still suspended (VerifyStillSuspended)
+      f. Scale up workloads (restore replicas)
+      g. Verify scaled up (WaitForScaleUp)
+      h. Verify still suspended (VerifyStillSuspended)
+      i. Resume Kustomization
+      j. Verify resumed
+      k. Set DryRunSucceeded with summary
+      l. Remove finalizer
+    REAL:
+      → handleSuspend
+      → handleScaleDown
+      → handleSnapshotting
+      → handleCommitting         ← point of no return
+      → handleReconciling
+      → handleHealthChecking
+      → handleCompleted
+```
+
+#### Rollback flow (revised)
+
+```
+ 1. Fetch UpgradeRequest                      (existing)
+ 2. Verify upgrade terminal                   (existing)
+ 3. Verify snapshots exist                    (existing)
+ 4. Verify previous version recorded          (existing)
+ 5. Fetch ManagedApp (via UpgradeRequest)     (NEW)
+ 6. Git diff preview                          (NEW — all operations)
+    a. Read file via GitManager.ReadFile()
+    b. Read current version via YAMLEditor.GetVersion()
+    c. Compute revert content via YAMLEditor.UpdateVersion()
+    d. Log version change
+ 7. Preflight checks                          (NEW — all operations)
+    a. ValidateSuspendTarget()
+    b. IsReconciled() — warn if not Ready
+    c. IsSuspended() — warn if already suspended
+    d. If snapshots present:
+       - Verify each snapshot still exists and ready
+       - DiscoverWorkloadsForPVCs()
+ 8. Branch:
+    DRY-RUN:
+      a. Suspend Kustomization
+      b. Verify suspended
+      c. Scale down discovered workloads
+      d. Verify scaled down (WaitForScaleDown)
+      e. Verify still suspended (VerifyStillSuspended)
+      f. Scale up workloads (restore replicas)
+      g. Verify scaled up (WaitForScaleUp)
+      h. Verify still suspended (VerifyStillSuspended)
+      i. Resume Kustomization
+      j. Verify resumed
+      k. Set DryRunSucceeded with summary
+      l. Remove finalizer
+    REAL:
+      → handleSuspend
+      → handleStopWorkload
+      → handleVolumeRestore      ← point of no return
+      → handleGitRevert
+      → handleReconciling
+      → handleHealthChecking
+      → handleCompleted
+```
